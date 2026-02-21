@@ -138,6 +138,15 @@ print(json.dumps({'sshPublicKey': pub, 'userSshPrivateKey': priv}))
 ")
 swamp workflow run test-vm-provisioning --input "$INPUT" --json
 
+# To keep the VM running after the test for inspection, add keepVm=true:
+KEEP_INPUT=$(python3 -c "
+import json
+pub = open('/tmp/swamp-test-key.pub').read().strip()
+priv = open('/tmp/swamp-test-key').read()
+print(json.dumps({'sshPublicKey': pub, 'userSshPrivateKey': priv, 'keepVm': True}))
+")
+swamp workflow run test-vm-provisioning --input "$KEEP_INPUT" --json
+
 # Clean up the throwaway key
 rm /tmp/swamp-test-key /tmp/swamp-test-key.pub
 ```

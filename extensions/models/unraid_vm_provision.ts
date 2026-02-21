@@ -26,6 +26,7 @@ const ProvisionArgsSchema = z.object({
 
 const DestroyArgsSchema = z.object({
   name: z.string().describe("VM name to destroy"),
+  keepVm: z.boolean().optional().describe("If true, skip destruction and leave the VM running"),
 });
 
 const VmSchema = z.object({
@@ -427,7 +428,13 @@ runcmd:
       arguments: DestroyArgsSchema,
       execute: async (args, context) => {
         const { sshHost, sshUser, sshPrivateKey, domainsDir } = context.globalArgs;
-        const { name } = args;
+        const { name, keepVm } = args;
+
+        if (keepVm) {
+          context.logger.info(`Skipping destroy for VM '${name}' (keepVm=true). VM is still running.`);
+          return { dataHandles: [] };
+        }
+
         const vmDir = `${domainsDir}/${name}`;
 
         const keyFile = `/tmp/.swamp-unraid-${Date.now()}`;
