@@ -1,0 +1,13 @@
+# Swamp managed defaults
+# Feel free to modify this file to suit your needs
+
+# Local telemetry (not needed for reconstruction)
+.swamp/telemetry/
+
+# Encryption keyfiles (NEVER commit - allows decrypting secrets)
+.swamp/secrets
+
+# Claude Code configuration (managed by swamp)
+.claude/
+
+.swamp
