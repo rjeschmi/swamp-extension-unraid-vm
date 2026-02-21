@@ -83,7 +83,7 @@ async function writeRemoteFileBinary(keyFile, user, host, remotePath, bytes) {
 }
 
 export const model = {
-  type: "@user/unraid-vm-provision",
+  type: "@rjeschmi/unraid-vm-provision",
   version: "2026.02.21.1",
   globalArguments: GlobalArgsSchema,
   resources: {

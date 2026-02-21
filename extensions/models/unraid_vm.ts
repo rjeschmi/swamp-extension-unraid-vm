@@ -45,7 +45,7 @@ async function graphqlRequest(host, apiKey, query, variables = {}) {
 }
 
 export const model = {
-  type: "@user/unraid-vm",
+  type: "@rjeschmi/unraid-vm",
   version: "2026.02.21.1",
   globalArguments: GlobalArgsSchema,
   resources: {

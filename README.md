@@ -3,9 +3,11 @@
 [Swamp](https://github.com/systeminit/swamp) extension models for managing
 virtual machines on [Unraid](https://unraid.net/).
 
+**Repository:** https://github.com/rjeschmi/swamp-extension-unraid-vm
+
 ## Models
 
-### `@user/unraid-vm`
+### `@rjeschmi/unraid-vm`
 
 Controls existing Unraid VMs via the Unraid GraphQL API (requires Unraid 6.12+).
 
@@ -20,7 +22,7 @@ Controls existing Unraid VMs via the Unraid GraphQL API (requires Unraid 6.12+).
 
 ---
 
-### `@user/unraid-vm-provision`
+### `@rjeschmi/unraid-vm-provision`
 
 Provisions new Ubuntu cloud-init VMs on Unraid over SSH using libvirt. No
 Unraid plugins required — only SSH access and a working QEMU/libvirt setup.
@@ -59,7 +61,7 @@ across provisions. VM disks are qcow2 with a backing file (no full copy).
 
 ---
 
-### `@user/cloud-init-iso`
+### `@rjeschmi/cloud-init-iso`
 
 Generates a cloud-init NoCloud seed ISO (ISO 9660) locally in pure JavaScript —
 no `genisoimage`, `mkisofs`, or Python required on the target host. Useful
@@ -87,8 +89,8 @@ swamp vault put unraid-secrets SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)"
 ### 2. Create model instances
 
 ```bash
-swamp model create @user/unraid-vm unraid-vms
-swamp model create @user/unraid-vm-provision unraid-vm-provision
+swamp model create @rjeschmi/unraid-vm unraid-vms
+swamp model create @rjeschmi/unraid-vm-provision unraid-vm-provision
 ```
 
 Then edit the generated YAML files to set your host, credentials, and VM

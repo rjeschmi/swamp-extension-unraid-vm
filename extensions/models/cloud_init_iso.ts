@@ -79,7 +79,7 @@ export function makeCloudInitIso(userData, metaData) {
 }
 
 export const model = {
-  type: "@user/cloud-init-iso",
+  type: "@rjeschmi/cloud-init-iso",
   version: "2026.02.21.1",
   globalArguments: z.object({}),
   files: {
