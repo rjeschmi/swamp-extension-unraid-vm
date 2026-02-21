@@ -36,7 +36,7 @@ Unraid plugins required — only SSH access and a working QEMU/libvirt setup.
 | `sshPrivateKey` | SSH private key in PEM format |
 | `domainsDir`   | VM storage directory, e.g. `/mnt/user/domains` |
 
-**Methods:** `provision`, `destroy`, `restart`, `dumpXml`
+**Methods:** `provision`, `verify`, `destroy`, `restart`, `dumpXml`
 
 **Provision arguments:**
 
@@ -52,6 +52,16 @@ Unraid plugins required — only SSH access and a working QEMU/libvirt setup.
 
 Ubuntu cloud images are cached in `<domainsDir>/.cloud-images` and reused
 across provisions. VM disks are qcow2 with a backing file (no full copy).
+
+**Verify arguments:**
+
+| Argument            | Description |
+|---------------------|-------------|
+| `name`              | VM name to verify |
+| `expectedHostname`  | Expected hostname after cloud-init |
+| `expectedUsername`  | Expected Unix username |
+| `userSshPrivateKey` | Private key matching the public key injected during provisioning |
+| `timeoutSeconds`    | Max seconds to wait for boot (default 300) |
 
 **What cloud-init configures on first boot:**
 - Hostname
@@ -108,6 +118,39 @@ swamp model method run unraid-vm-provision provision
 # Destroy it
 swamp model method run unraid-vm-provision destroy
 ```
+
+## Testing
+
+The `test-vm-provisioning` workflow runs a full integration test: provisions an
+ephemeral VM, verifies cloud-init applied correctly, then destroys it (~45s
+end-to-end).
+
+```bash
+# Generate a throwaway keypair
+ssh-keygen -t ed25519 -N "" -f /tmp/swamp-test-key -C "swamp-ci-test"
+
+# Run the workflow
+INPUT=$(python3 -c "
+import json
+pub = open('/tmp/swamp-test-key.pub').read().strip()
+priv = open('/tmp/swamp-test-key').read()
+print(json.dumps({'sshPublicKey': pub, 'userSshPrivateKey': priv}))
+")
+swamp workflow run test-vm-provisioning --input "$INPUT" --json
+
+# Clean up the throwaway key
+rm /tmp/swamp-test-key /tmp/swamp-test-key.pub
+```
+
+The workflow checks that:
+- The VM booted and received a DHCP address
+- SSH is reachable as the provisioned user
+- `hostname` matches the VM name
+- The user account exists
+- `cloud-init status` is `done`
+
+The destroy job runs unconditionally, so the test VM is always cleaned up even
+if verification fails.
 
 ## Requirements
 

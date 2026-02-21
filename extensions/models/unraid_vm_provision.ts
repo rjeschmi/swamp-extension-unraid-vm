@@ -38,6 +38,15 @@ const VmSchema = z.object({
   memoryMiB: z.number(),
 });
 
+const VerifyResultSchema = z.object({
+  name: z.string(),
+  vmIp: z.string(),
+  hostname: z.string(),
+  username: z.string(),
+  cloudInitStatus: z.string(),
+  passed: z.boolean(),
+});
+
 const dec = new TextDecoder();
 
 async function runSsh(keyFile, user, host, command, { allowFailure = false } = {}) {
@@ -91,6 +100,12 @@ export const model = {
       description: "A provisioned cloud-init Ubuntu VM",
       schema: VmSchema,
       lifetime: "infinite",
+      garbageCollection: 10,
+    },
+    verifyResult: {
+      description: "Result of a cloud-init verification run",
+      schema: VerifyResultSchema,
+      lifetime: "7d",
       garbageCollection: 10,
     },
   },
@@ -291,6 +306,119 @@ runcmd:
           await Deno.remove(keyFile).catch(() => {});
         }
         return { dataHandles: [] };
+      },
+    },
+
+    verify: {
+      description: "Wait for a provisioned VM to boot and verify cloud-init completed successfully",
+      arguments: z.object({
+        name: z.string().describe("VM name to verify"),
+        expectedHostname: z.string().describe("Expected hostname after cloud-init"),
+        expectedUsername: z.string().describe("Expected Unix username created by cloud-init"),
+        userSshPrivateKey: z.string().describe("Private SSH key corresponding to the public key injected during provisioning"),
+        timeoutSeconds: z.number().int().min(30).optional().describe("Max seconds to wait for VM to boot (default 300)"),
+      }),
+      execute: async (args, context) => {
+        const { sshHost, sshUser, sshPrivateKey } = context.globalArgs;
+        const { name, expectedHostname, expectedUsername, userSshPrivateKey } = args;
+        const timeoutMs = (args.timeoutSeconds ?? 300) * 1000;
+        const pollInterval = 10_000;
+
+        const rootKeyFile = `/tmp/.swamp-root-${Date.now()}`;
+        const userKeyFile = `/tmp/.swamp-user-${Date.now()}`;
+        await Deno.writeTextFile(rootKeyFile, sshPrivateKey.endsWith("\n") ? sshPrivateKey : sshPrivateKey + "\n", { mode: 0o600 });
+        await Deno.writeTextFile(userKeyFile, userSshPrivateKey.endsWith("\n") ? userSshPrivateKey : userSshPrivateKey + "\n", { mode: 0o600 });
+
+        const rootSsh = (cmd, opts) => runSsh(rootKeyFile, sshUser, sshHost, cmd, opts);
+
+        let vmIp = null;
+
+        try {
+          context.logger.info(`Waiting for VM '${name}' to boot (timeout: ${args.timeoutSeconds ?? 300}s)...`);
+          const deadline = Date.now() + timeoutMs;
+
+          // Poll guest agent for IP (available once VM has DHCP lease and agent is running)
+          while (Date.now() < deadline) {
+            const res = await rootSsh(
+              `virsh domifaddr '${name}' --source agent 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1 | grep -v '^127\\.' | grep -v '^169\\.254\\.' | head -1`,
+              { allowFailure: true },
+            );
+            if (res.stdout && res.stdout.trim() !== "") {
+              vmIp = res.stdout.trim();
+              context.logger.info(`VM IP: ${vmIp}`);
+              break;
+            }
+            context.logger.info("No IP yet, retrying in 10s...");
+            await new Promise((r) => setTimeout(r, pollInterval));
+          }
+
+          if (!vmIp) {
+            throw new Error(`VM '${name}' did not get an IP within ${args.timeoutSeconds ?? 300}s`);
+          }
+
+          // Poll until SSH is reachable as the provisioned user
+          let sshReady = false;
+          while (Date.now() < deadline) {
+            const res = await runSsh(userKeyFile, expectedUsername, vmIp, "echo ready", { allowFailure: true });
+            if (res.code === 0 && res.stdout.trim() === "ready") {
+              sshReady = true;
+              break;
+            }
+            context.logger.info("SSH not ready yet, retrying in 10s...");
+            await new Promise((r) => setTimeout(r, pollInterval));
+          }
+
+          if (!sshReady) {
+            throw new Error(`VM '${name}' (${vmIp}) SSH not available within timeout`);
+          }
+
+          context.logger.info("SSH ready. Running cloud-init verification...");
+
+          // Wait for cloud-init to finish, then collect results
+          const [hostnameRes, userRes, ciRes] = await Promise.all([
+            runSsh(userKeyFile, expectedUsername, vmIp, "hostname"),
+            runSsh(userKeyFile, expectedUsername, vmIp, `id ${expectedUsername}`, { allowFailure: true }),
+            runSsh(userKeyFile, expectedUsername, vmIp,
+              "sudo cloud-init status --wait --format json 2>/dev/null || echo '{\"status\":\"unknown\"}'",
+              { allowFailure: true }),
+          ]);
+
+          const actualHostname = hostnameRes.stdout.trim();
+          let cloudInitStatus = "unknown";
+          try {
+            cloudInitStatus = JSON.parse(ciRes.stdout).status ?? "unknown";
+          } catch {
+            cloudInitStatus = ciRes.stdout.trim() || "unknown";
+          }
+
+          context.logger.info(`hostname: expected='${expectedHostname}' actual='${actualHostname}'`);
+          context.logger.info(`user '${expectedUsername}': ${userRes.code === 0 ? "exists" : "NOT FOUND"}`);
+          context.logger.info(`cloud-init status: ${cloudInitStatus}`);
+
+          const passed = actualHostname === expectedHostname &&
+            userRes.code === 0 &&
+            cloudInitStatus === "done";
+
+          if (!passed) {
+            const reasons = [];
+            if (actualHostname !== expectedHostname) {
+              reasons.push(`hostname: got '${actualHostname}', expected '${expectedHostname}'`);
+            }
+            if (userRes.code !== 0) reasons.push(`user '${expectedUsername}' not found`);
+            if (cloudInitStatus !== "done") reasons.push(`cloud-init status '${cloudInitStatus}' (expected 'done')`);
+            throw new Error(`Verification failed: ${reasons.join("; ")}`);
+          }
+
+          context.logger.info(`VM '${name}' verification passed.`);
+
+          const handle = await context.writeResource("verifyResult", name, {
+            name, vmIp, hostname: actualHostname, username: expectedUsername, cloudInitStatus, passed,
+          });
+          return { dataHandles: [handle] };
+        } finally {
+          await Deno.remove(rootKeyFile).catch(() => {});
+          await Deno.remove(userKeyFile).catch(() => {});
+        }
       },
     },
 

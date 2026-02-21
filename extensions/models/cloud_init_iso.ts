@@ -1,3 +1,4 @@
+// @ts-nocheck — swamp extension models run without type checking; annotations are omitted per convention
 import { z } from "npm:zod@4";
 
 // Build a minimal ISO 9660 cloud-init seed image locally — no remote tools required.
