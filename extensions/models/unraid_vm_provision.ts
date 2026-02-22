@@ -14,6 +14,12 @@ const GlobalArgsSchema = z.object({
   domainsDir: z.string().describe("VM storage base directory"),
 });
 
+const MountSchema = z.object({
+  hostPath: z.string().describe("Host path on Unraid to expose (e.g. /mnt/user/home/rob)"),
+  tag: z.string().describe("Mount tag — used as the device name when mounting inside the VM"),
+  mountPoint: z.string().optional().describe("Path inside the VM to automount via cloud-init (omit to skip)"),
+});
+
 const ProvisionArgsSchema = z.object({
   name: z.string().describe("VM name / hostname"),
   cpus: z.number().int().min(1).describe("Number of vCPUs"),
@@ -22,6 +28,7 @@ const ProvisionArgsSchema = z.object({
   ubuntuVersion: z.enum(["24.04", "22.04", "20.04"]).describe("Ubuntu version"),
   sshPublicKey: z.string().describe("SSH public key to inject"),
   username: z.string().describe("Unix username to create"),
+  mounts: z.array(MountSchema).optional().describe("Host paths to expose inside the VM via virtio-9p"),
 });
 
 const DestroyArgsSchema = z.object({
@@ -116,7 +123,7 @@ export const model = {
       arguments: ProvisionArgsSchema,
       execute: async (args, context) => {
         const { sshHost, sshUser, sshPrivateKey, domainsDir } = context.globalArgs;
-        const { name, cpus, memoryMiB, diskSizeGb, ubuntuVersion, sshPublicKey, username } = args;
+        const { name, cpus, memoryMiB, diskSizeGb, ubuntuVersion, sshPublicKey, username, mounts = [] } = args;
 
         const imageUrl = UBUNTU_IMAGES[ubuntuVersion];
         const imageName = imageUrl.split("/").pop();
@@ -153,6 +160,12 @@ export const model = {
 
           // 4. Build cloud-init seed ISO locally and upload — no remote tools required
           context.logger.info("Building cloud-init seed ISO...");
+          const mountsWithPoint = mounts.filter((m) => m.mountPoint);
+          const mountsSection = mountsWithPoint.length > 0
+            ? `mounts:\n${mountsWithPoint.map((m) => `  - [${m.tag}, ${m.mountPoint}, 9p, "trans=virtio,rw,nofail", 0, 0]`).join("\n")}\n`
+            : "";
+          const mkdirCmds = mountsWithPoint.map((m) => `  - mkdir -p '${m.mountPoint}'`).join("\n");
+
           const userData = `#cloud-config
 hostname: ${name}
 users:
@@ -164,9 +177,10 @@ users:
 package_update: true
 packages:
   - qemu-guest-agent
-runcmd:
+${mountsSection}runcmd:
   - systemctl enable qemu-guest-agent
   - systemctl start qemu-guest-agent
+${mkdirCmds}
 `;
           const metaData = `instance-id: ${name}\nlocal-hostname: ${name}\n`;
 
@@ -248,6 +262,10 @@ runcmd:
     <channel type='unix'>
       <target type='virtio' name='org.qemu.guest_agent.0'/>
     </channel>
+${mounts.map((m) => `    <filesystem type='mount' accessmode='passthrough'>
+      <source dir='${m.hostPath}'/>
+      <target dir='${m.tag}'/>
+    </filesystem>`).join("\n")}
   </devices>
 </domain>`;
 
