@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(swamp model type search:*)",
+      "Bash(swamp model type describe:*)",
+      "Bash(swamp model search:*)",
+      "Bash(swamp model create:*)",
+      "Bash(swamp model edit:*)",
+      "Bash(swamp model delete:*)",
+      "Bash(swamp model get:*)",
+      "Bash(swamp model validate:*)",
+      "Bash(swamp model output:*)",
+      "Bash(swamp model method history:*)",
+      "Bash(swamp workflow search:*)",
+      "Bash(swamp workflow create:*)",
+      "Bash(swamp workflow edit:*)",
+      "Bash(swamp workflow delete:*)",
+      "Bash(swamp workflow get:*)",
+      "Bash(swamp workflow validate:*)",
+      "Bash(swamp workflow schema:*)",
+      "Bash(swamp workflow history:*)",
+      "Bash(swamp vault:*)",
+      "Bash(swamp data:*)",
+      "Bash(swamp repo:*)",
+      "Bash(swamp telemetry:*)",
+      "Bash(swamp init:*)",
+      "Bash(swamp version:*)",
+      "Bash(swamp completions:*)",
+      "Bash(swamp issue:*)",
+      "Bash(swamp model:*)",
+      "Bash(git check-ignore:*)",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebSearch",
+      "Bash(head:*)",
+      "Bash(python3:*)",
+      "Bash(npm info:*)"
+    ]
+  }
+}
