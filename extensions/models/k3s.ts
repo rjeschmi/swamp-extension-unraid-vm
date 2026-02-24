@@ -45,7 +45,7 @@ async function runSsh(keyFile, user, host, command, { allowFailure = false } = {
 
 
 export const model = {
-  type: "@rjeschmi/rancher",
+  type: "@rjeschmi/k3s",
   version: "2026.02.23.1",
   globalArguments: GlobalArgsSchema,
   resources: {

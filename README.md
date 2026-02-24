@@ -86,6 +86,137 @@ standalone or as a library imported by other models.
 
 Returns the ISO as a binary file artifact.
 
+---
+
+### `@rjeschmi/k3s`
+
+Installs k3s on a provisioned VM via SSH and waits for the node to be ready.
+Helm chart installs are handled separately by `@rjeschmi/helm-chart`.
+
+**Global arguments:**
+
+| Argument          | Description |
+|-------------------|-------------|
+| `sshHost`         | Unraid SSH hostname or IP |
+| `sshUser`         | SSH username (typically `root`) |
+| `sshPrivateKey`   | SSH private key for Unraid |
+| `vmSshUser`       | Username on the VM |
+| `vmSshPrivateKey` | SSH private key for the VM user |
+
+**Methods:** `install`, `uninstall`
+
+**`install` arguments:**
+
+| Argument         | Description |
+|------------------|-------------|
+| `vmName`         | VM name (used to discover IP via virsh) |
+| `timeoutSeconds` | Max seconds to wait (default: 600) |
+
+Writes a `cluster` resource with `vmName`, `vmIp`, and `k3sVersion`.
+
+---
+
+### `@rjeschmi/rancher-kubeconfig`
+
+Fetches `/etc/rancher/k3s/k3s.yaml` from a k3s VM over SSH, rewrites the
+server address from `127.0.0.1` to the VM's real IP, and stores it as a
+resource.
+
+**Global arguments:**
+
+| Argument          | Description |
+|-------------------|-------------|
+| `sshHost`         | Unraid SSH hostname or IP |
+| `sshUser`         | SSH username (typically `root`) |
+| `sshPrivateKey`   | SSH private key for Unraid |
+| `vmSshUser`       | Username on the VM |
+| `vmSshPrivateKey` | SSH private key for the VM user |
+
+**Methods:** `fetch`
+
+| Argument  | Description |
+|-----------|-------------|
+| `vmName`  | VM name to fetch kubeconfig from (default: `rancher`) |
+
+```bash
+# Fetch the kubeconfig (vmName defaults to "rancher")
+swamp model method run rancher-kubeconfig fetch --json
+
+# Fetch for a different VM
+swamp model method run rancher-kubeconfig fetch --input '{"vmName": "my-vm"}' --json
+
+# Export to a local file for direct kubectl use
+OUTPUT_ID=$(swamp model output search rancher-kubeconfig --json | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['results'][0]['id'])")
+swamp model output data "$OUTPUT_ID" --json | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['kubeconfig'])" > ~/.kube/rancher.yaml
+export KUBECONFIG=~/.kube/rancher.yaml
+kubectl get nodes
+```
+
+Reference the kubeconfig from other models using a CEL expression:
+
+```yaml
+kubeconfig: ${{ model.rancher-kubeconfig.resource.kubeconfig.rancher.attributes.kubeconfig }}
+```
+
+---
+
+### `@rjeschmi/helm-chart`
+
+Installs, upgrades, and uninstalls Helm charts against any cluster using a
+kubeconfig passed as a global argument. Runs `helm` locally — no Helm required
+on the target VM.
+
+**Global arguments:**
+
+| Argument     | Description |
+|--------------|-------------|
+| `kubeconfig` | kubeconfig YAML content for the target cluster |
+
+**Methods:** `install`, `uninstall`, `status`
+
+**`install` arguments:**
+
+| Argument          | Description |
+|-------------------|-------------|
+| `releaseName`     | Helm release name |
+| `chart`           | Chart reference, e.g. `ingress-nginx/ingress-nginx` |
+| `namespace`       | Target Kubernetes namespace |
+| `repoName`        | Helm repo name to add (optional) |
+| `repoUrl`         | Helm repo URL — required if `repoName` is set |
+| `version`         | Chart version (default: latest) |
+| `values`          | Key/value pairs passed as `--set` flags |
+| `valuesYaml`      | Raw YAML string passed as `-f` |
+| `createNamespace` | Create namespace if missing (default: `true`) |
+| `waitSeconds`     | Seconds to `--wait` (default: 300, set to 0 to skip) |
+
+Two instances are provided:
+
+- **`rancher-helm`** — general-purpose instance wired to
+  `vault.get(unraid-secrets, RANCHER_KUBECONFIG)`, useful for ad-hoc chart
+  installs:
+
+  ```bash
+  swamp model method run rancher-helm install --input '{
+    "releaseName": "ingress-nginx",
+    "chart": "ingress-nginx/ingress-nginx",
+    "namespace": "ingress-nginx",
+    "repoName": "ingress-nginx",
+    "repoUrl": "https://kubernetes.github.io/ingress-nginx"
+  }' --json
+  ```
+
+- **`rancher-install-helm`** — used by the `rancher-vm` workflow; kubeconfig
+  is wired to the live `rancher-kubeconfig` model resource so it always uses
+  the freshly fetched kubeconfig:
+
+  ```yaml
+  kubeconfig: ${{ model.rancher-kubeconfig.resource.kubeconfig.rancher.attributes.kubeconfig }}
+  ```
+
+---
+
 ## Setup
 
 ### 1. Create a vault for secrets
@@ -94,6 +225,8 @@ Returns the ISO as a binary file artifact.
 swamp vault create local_encryption unraid-secrets
 swamp vault put unraid-secrets UNRAID_API_KEY=<your-api-key>
 swamp vault put unraid-secrets SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)"
+# For Rancher VM workflows:
+swamp vault put unraid-secrets RANCHER_VM_SSH_PRIVATE_KEY="$(cat ~/.ssh/rancher_vm_key)"
 ```
 
 ### 2. Create model instances
@@ -119,64 +252,61 @@ swamp model method run unraid-vm-provision provision
 swamp model method run unraid-vm-provision destroy
 ```
 
-## Rancher VM Kubeconfig
+---
 
-The `@rjeschmi/rancher-kubeconfig` model fetches `/etc/rancher/k3s/k3s.yaml`
-from the Rancher VM over SSH, rewrites the server address from `127.0.0.1` to
-the VM's real IP, and stores it as a resource.
+## Rancher VM Workflow
 
-### Global arguments
+The `rancher-vm` workflow provisions a VM on Unraid and installs a full Rancher
+stack (k3s + cert-manager + Rancher) end-to-end. Each stage is a separate job
+using the appropriate model:
 
-| Argument          | Description |
-|-------------------|-------------|
-| `sshHost`         | Unraid SSH hostname or IP |
-| `sshUser`         | SSH username (typically `root`) |
-| `sshPrivateKey`   | SSH private key for Unraid |
-| `vmSshUser`       | Username on the VM |
-| `vmSshPrivateKey` | SSH private key for the VM user |
+| Job | Model | What it does |
+|-----|-------|-------------|
+| `provision` | `@rjeschmi/unraid-vm-provision` | Create Ubuntu VM with cloud-init |
+| `install` | `@rjeschmi/k3s` | Install k3s, wait for node ready |
+| `fetch-kubeconfig` | `@rjeschmi/rancher-kubeconfig` | Fetch kubeconfig, rewrite server IP |
+| `install-cert-manager` | `@rjeschmi/helm-chart` | Install jetstack/cert-manager |
+| `install-rancher` | `@rjeschmi/helm-chart` | Install rancher-latest/rancher |
 
-### Methods
+### Prerequisites
 
-**`fetch`** — Discovers the VM's IP via `virsh domifaddr`, SSHes in, reads the
-kubeconfig, rewrites the server URL, and stores the result.
-
-| Argument  | Description |
-|-----------|-------------|
-| `vmName`  | VM name (used to look up the IP via virsh on Unraid) |
-
-### Usage
+Store secrets in the vault (one-time setup):
 
 ```bash
-# Fetch and store the kubeconfig
-swamp model method run rancher-kubeconfig fetch --json
-
-# Store the kubeconfig in vault for use outside swamp
-KUBECONFIG=$(swamp model output data <output-id> --json | \
-  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['kubeconfig'])")
-swamp vault put unraid-secrets "RANCHER_KUBECONFIG=$KUBECONFIG" -f
+swamp vault create local_encryption unraid-secrets
+swamp vault put unraid-secrets SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)"
+swamp vault put unraid-secrets RANCHER_VM_SSH_PRIVATE_KEY="$(cat ~/.ssh/rancher_vm_key)"
 ```
 
-The kubeconfig is stored in the `unraid-secrets` vault under `RANCHER_KUBECONFIG`
-and can be used directly with `kubectl`:
+`helm` and `kubectl` must be installed locally — chart installs run on your
+machine against the cluster, not on the VM.
+
+### Run the workflow
 
 ```bash
-# Use via vault expression in a workflow or model
-kubeconfig: ${{ vault.get(unraid-secrets, RANCHER_KUBECONFIG) }}
-
-# Export to a local file for direct kubectl use
-OUTPUT_ID=$(swamp model output search rancher-kubeconfig --json | \
-  python3 -c "import sys,json; print(json.load(sys.stdin)['results'][0]['id'])")
-swamp model output data "$OUTPUT_ID" --json | \
-  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['kubeconfig'])" > ~/.kube/rancher.yaml
-export KUBECONFIG=~/.kube/rancher.yaml
-kubectl get nodes
+swamp workflow run rancher-vm --input '{
+  "sshPublicKey": "'$(cat ~/.ssh/rancher_vm_key.pub)'"
+}' --json
 ```
 
-Reference the kubeconfig from other models using a CEL expression:
+Optional inputs (all have defaults):
 
-```yaml
-kubeconfig: ${{ model.rancher-kubeconfig.resource.kubeconfig.rancher.attributes.kubeconfig }}
+| Input            | Default    | Description |
+|------------------|------------|-------------|
+| `vmName`         | `rancher`  | VM name and hostname |
+| `username`       | `rancher`  | Unix username created by cloud-init |
+| `sshPublicKey`   | _(required)_ | Public key injected into the VM |
+| `rancherVersion` | `latest`   | Rancher Helm chart version |
+
+Check progress:
+
+```bash
+swamp workflow history get rancher-vm --json
+swamp workflow history logs rancher-vm --json
 ```
+
+Once complete, Rancher is available at `https://<vm-ip>.sslip.io` with
+bootstrap password `admin`.
 
 ---
 
@@ -305,6 +435,8 @@ if verification fails.
 - Unraid 6.12+ (for GraphQL API support)
 - SSH access to Unraid with libvirt/QEMU available
 - `virsh` on the Unraid host
+- `helm` installed locally (for `@rjeschmi/helm-chart`)
+- `kubectl` installed locally (for post-install status checks)
 
 ## License
 
