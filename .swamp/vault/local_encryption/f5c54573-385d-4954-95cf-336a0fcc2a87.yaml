@@ -1,0 +1,7 @@
+id: f5c54573-385d-4954-95cf-336a0fcc2a87
+name: unraid-secrets
+type: local_encryption
+config:
+  auto_generate: true
+  base_dir: /Users/rob/swamp/rancher-ui-plugin
+createdAt: '2026-02-21T17:08:45.058Z'

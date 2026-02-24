@@ -1,19 +1,30 @@
-# Swamp managed defaults
-# Feel free to modify this file to suit your needs
-
-# Local telemetry (not needed for reconstruction)
+# Swamp runtime data (not needed for reconstruction)
+.swamp/data/
+.swamp/outputs/
+.swamp/workflow-runs/
+.swamp/workflows-evaluated/
 .swamp/telemetry/
 
 # Encryption keyfiles (NEVER commit - allows decrypting secrets)
-.swamp/secrets
+.swamp/secrets/
 
 # Claude Code configuration (managed by swamp)
 .claude/
 
-.swamp
+# Vault data
+vaults/
+
+# Workflow run history in logical views
+workflows/*/runs/
+
+# Model runtime data symlinks in logical views
+models/*/outputs/
+models/*/source/
+models/*/step/
+models/*/type/
+models/*/modelName/
+models/*/specName/
+models/*/workflow/
 
 # OpenStack credentials
 openrc.sh
-
-# Vault data
-vaults/

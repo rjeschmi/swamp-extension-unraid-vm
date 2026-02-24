@@ -1,0 +1,30 @@
+type: '@user/unraid-vm-provision'
+typeVersion: 2026.02.21.1
+id: 958f7654-382d-48e4-b23c-6ebfd4ace300
+name: unraid-vm-provision
+version: 1
+tags: {}
+globalArguments:
+  sshHost: tower.humpback-salary.ts.net
+  sshUser: root
+  sshPrivateKey: '${{ vault.get(unraid-secrets, SSH_PRIVATE_KEY) }}'
+  domainsDir: /mnt/user/domains
+methods:
+  provision:
+    arguments:
+      name: test
+      cpus: 2
+      memoryMiB: 2048
+      diskSizeGb: 20
+      ubuntuVersion: '24.04'
+      sshPublicKey: >-
+        ssh-ed25519
+        AAAAC3NzaC1lZDI1NTE5AAAAILqHFGFHg0RFLKvyzmS6NcbJHnKSITIO1bhUOqPDkcCi
+        rob@Roberts-MacBook-Air.local
+      username: ubuntu
+  restart:
+    arguments:
+      name: test
+  destroy:
+    arguments:
+      name: test
