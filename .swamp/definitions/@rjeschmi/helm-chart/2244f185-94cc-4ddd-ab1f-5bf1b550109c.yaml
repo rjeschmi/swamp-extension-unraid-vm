@@ -1,0 +1,54 @@
+type: '@rjeschmi/helm-chart'
+typeVersion: 2026.02.23.1
+id: 2244f185-94cc-4ddd-ab1f-5bf1b550109c
+name: rancher-install-helm
+version: 1
+tags: {}
+globalArguments:
+  kubeconfig: ${{ model.rancher-kubeconfig.resource.kubeconfig.rancher.attributes.kubeconfig }}
+inputs:
+  properties:
+    releaseName:
+      type: string
+    chart:
+      type: string
+    namespace:
+      type: string
+    repoName:
+      type: string
+      default: ""
+    repoUrl:
+      type: string
+      default: ""
+    version:
+      type: string
+      default: ""
+    values:
+      type: object
+      default: {}
+    waitSeconds:
+      type: integer
+      default: 300
+  required:
+    - releaseName
+    - chart
+    - namespace
+methods:
+  install:
+    arguments:
+      releaseName: ${{ inputs.releaseName }}
+      chart: ${{ inputs.chart }}
+      namespace: ${{ inputs.namespace }}
+      repoName: ${{ inputs.repoName }}
+      repoUrl: ${{ inputs.repoUrl }}
+      version: ${{ inputs.version }}
+      values: ${{ inputs.values }}
+      waitSeconds: ${{ inputs.waitSeconds }}
+  uninstall:
+    arguments:
+      releaseName: ${{ inputs.releaseName }}
+      namespace: ${{ inputs.namespace }}
+  status:
+    arguments:
+      releaseName: ${{ inputs.releaseName }}
+      namespace: ${{ inputs.namespace }}

@@ -1,0 +1,137 @@
+id: 0f5a3e0f-3914-4fa1-8b1f-fb2d029c15c0
+name: rancher-vm
+description: Provision a VM on Unraid and install Rancher (k3s + cert-manager + Rancher via Helm)
+tags: {}
+version: 1
+inputs:
+  properties:
+    vmName:
+      type: string
+      description: Name (and hostname) for the Rancher VM
+      default: rancher
+    username:
+      type: string
+      description: Unix username to create via cloud-init
+      default: rancher
+    sshPublicKey:
+      type: string
+      description: SSH public key to inject into the VM (corresponds to RANCHER_VM_SSH_PRIVATE_KEY in vault)
+    rancherVersion:
+      type: string
+      description: Rancher Helm chart version
+      default: latest
+  required:
+    - sshPublicKey
+jobs:
+  - name: provision
+    description: Provision an Ubuntu VM with cloud-init
+    dependsOn: []
+    weight: 0
+    steps:
+      - name: provision
+        description: Create VM, build and upload cloud-init ISO, start VM
+        dependsOn: []
+        weight: 0
+        task:
+          type: model_method
+          modelIdOrName: rancher-vm
+          methodName: provision
+          inputs:
+            vmName: ${{ inputs.vmName }}
+            username: ${{ inputs.username }}
+            sshPublicKey: ${{ inputs.sshPublicKey }}
+
+  - name: install
+    description: Install k3s on the provisioned VM
+    dependsOn:
+      - job: provision
+        condition:
+          type: succeeded
+    weight: 0
+    steps:
+      - name: install
+        description: Install k3s and wait for node ready
+        dependsOn: []
+        weight: 0
+        task:
+          type: model_method
+          modelIdOrName: rancher
+          methodName: install
+          inputs:
+            vmName: ${{ inputs.vmName }}
+
+  - name: fetch-kubeconfig
+    description: Fetch k3s kubeconfig from the VM
+    dependsOn:
+      - job: install
+        condition:
+          type: succeeded
+    weight: 0
+    steps:
+      - name: fetch
+        description: SSH into VM and retrieve kubeconfig, rewriting server address to VM IP
+        dependsOn: []
+        weight: 0
+        task:
+          type: model_method
+          modelIdOrName: rancher-kubeconfig
+          methodName: fetch
+          inputs:
+            vmName: ${{ inputs.vmName }}
+
+  - name: install-cert-manager
+    description: Install cert-manager via Helm
+    dependsOn:
+      - job: fetch-kubeconfig
+        condition:
+          type: succeeded
+    weight: 0
+    steps:
+      - name: install
+        description: Install jetstack/cert-manager with CRDs enabled
+        dependsOn: []
+        weight: 0
+        task:
+          type: model_method
+          modelIdOrName: rancher-install-helm
+          methodName: install
+          inputs:
+            releaseName: cert-manager
+            chart: jetstack/cert-manager
+            namespace: cert-manager
+            repoName: jetstack
+            repoUrl: https://charts.jetstack.io
+            version: ""
+            values:
+              crds.enabled: "true"
+            waitSeconds: 300
+
+  - name: install-rancher
+    description: Install Rancher via Helm
+    dependsOn:
+      - job: install-cert-manager
+        condition:
+          type: succeeded
+    weight: 0
+    steps:
+      - name: install
+        description: Install rancher-latest/rancher with sslip.io hostname
+        dependsOn: []
+        weight: 0
+        task:
+          type: model_method
+          modelIdOrName: rancher-install-helm
+          methodName: install
+          inputs:
+            releaseName: rancher
+            chart: rancher-latest/rancher
+            namespace: cattle-system
+            repoName: rancher-latest
+            repoUrl: https://releases.rancher.com/server-charts/latest
+            version: ${{ inputs.rancherVersion }}
+            values:
+              hostname: ${{ model.rancher-kubeconfig.resource.kubeconfig.rancher.attributes.vmIp + ".sslip.io" }}
+              bootstrapPassword: admin
+              ingress.tls.source: rancher
+              ingress.ingressClassName: traefik
+            waitSeconds: 1200

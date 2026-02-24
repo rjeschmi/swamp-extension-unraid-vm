@@ -1,0 +1,52 @@
+type: '@rjeschmi/helm-chart'
+typeVersion: 2026.02.23.1
+id: 2927f454-647e-4c91-8d75-ac0f84c13167
+name: rancher-helm
+version: 1
+tags: {}
+globalArguments:
+  kubeconfig: ${{ vault.get(unraid-secrets, RANCHER_KUBECONFIG) }}
+inputs:
+  properties:
+    releaseName:
+      type: string
+      description: Helm release name
+    chart:
+      type: string
+      description: Chart name (e.g. ingress-nginx/ingress-nginx)
+    namespace:
+      type: string
+      description: Kubernetes namespace
+    repoName:
+      type: string
+      description: Helm repo name to add
+      default: ""
+    repoUrl:
+      type: string
+      description: Helm repo URL
+      default: ""
+    version:
+      type: string
+      description: Chart version (default latest)
+      default: ""
+  required:
+    - releaseName
+    - chart
+    - namespace
+methods:
+  install:
+    arguments:
+      releaseName: ${{ inputs.releaseName }}
+      chart: ${{ inputs.chart }}
+      namespace: ${{ inputs.namespace }}
+      repoName: ${{ inputs.repoName }}
+      repoUrl: ${{ inputs.repoUrl }}
+      version: ${{ inputs.version }}
+  uninstall:
+    arguments:
+      releaseName: ${{ inputs.releaseName }}
+      namespace: ${{ inputs.namespace }}
+  status:
+    arguments:
+      releaseName: ${{ inputs.releaseName }}
+      namespace: ${{ inputs.namespace }}

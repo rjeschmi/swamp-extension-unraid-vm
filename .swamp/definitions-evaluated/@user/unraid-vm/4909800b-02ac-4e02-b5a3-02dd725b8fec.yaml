@@ -1,0 +1,27 @@
+type: '@user/unraid-vm'
+typeVersion: 2026.02.21.1
+id: 4909800b-02ac-4e02-b5a3-02dd725b8fec
+name: unraid-vms
+version: 1
+tags: {}
+globalArguments:
+  host: 'https://tower.humpback-salary.ts.net.'
+  apiKey: '${{ vault.get(unraid-secrets, UNRAID_API_KEY) }}'
+methods:
+  start:
+    arguments:
+      vmUuid: >-
+        c1b692b9c20ab6a735937f7c15539cb58a3d3456f86634e5f553a9bc9187b7e0:c2447805-f3ef-0703-0e46-cfebad586ab7
+  stop:
+    arguments:
+      vmUuid: >-
+        c1b692b9c20ab6a735937f7c15539cb58a3d3456f86634e5f553a9bc9187b7e0:c2447805-f3ef-0703-0e46-cfebad586ab7
+  forceStop:
+    arguments:
+      vmUuid: ''
+  pause:
+    arguments:
+      vmUuid: ''
+  resume:
+    arguments:
+      vmUuid: ''

@@ -1,0 +1,26 @@
+type: '@rjeschmi/k3s'
+typeVersion: 2026.02.23.1
+id: 41402fe0-2432-4eaf-83a5-ec7e39b4feda
+name: rancher
+version: 1
+tags: {}
+globalArguments:
+  sshHost: tower.humpback-salary.ts.net
+  sshUser: root
+  sshPrivateKey: '${{ vault.get(unraid-secrets, SSH_PRIVATE_KEY) }}'
+  vmSshUser: rancher
+  vmSshPrivateKey: '${{ vault.get(unraid-secrets, RANCHER_VM_SSH_PRIVATE_KEY) }}'
+methods:
+  install:
+    arguments:
+      vmName: rancher
+  uninstall:
+    arguments:
+      vmName: rancher
+inputs:
+  properties:
+    vmName:
+      type: string
+      description: VM name to install k3s on
+      default: rancher
+  required: []

@@ -1,0 +1,46 @@
+type: '@rjeschmi/unraid-vm-provision'
+typeVersion: 2026.02.21.1
+id: 1117226e-b053-417f-be8c-0c84a807394e
+name: rancher-vm
+version: 1
+tags: {}
+globalArguments:
+  sshHost: tower.humpback-salary.ts.net
+  sshUser: root
+  sshPrivateKey: '${{ vault.get(unraid-secrets, SSH_PRIVATE_KEY) }}'
+  domainsDir: /mnt/user/fast/domains
+methods:
+  provision:
+    arguments:
+      name: rancher
+      cpus: 4
+      memoryMiB: 8192
+      diskSizeGb: 40
+      ubuntuVersion: '24.04'
+      sshPublicKey: >-
+        ssh-ed25519
+        AAAAC3NzaC1lZDI1NTE5AAAAICsZVHZfHfX5YLdnl7snngEDxZ9SSZONrj8rVGYDAinM
+        rancher-vm
+      username: rancher
+      mounts:
+        - hostPath: /mnt/user/home/rob
+          tag: shares
+          mountPoint: /mnt/shares
+  destroy:
+    arguments:
+      name: rancher
+inputs:
+  properties:
+    vmName:
+      type: string
+      description: Name (and hostname) for the Rancher VM
+      default: rancher
+    username:
+      type: string
+      description: Unix username to create via cloud-init
+      default: rancher
+    sshPublicKey:
+      type: string
+      description: SSH public key to inject into the VM
+  required:
+    - sshPublicKey

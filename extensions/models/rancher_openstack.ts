@@ -67,6 +67,132 @@ async function rancherRequest(rancherUrl, token, method, path, body, insecure = 
   return JSON.parse(text);
 }
 
+async function scheduleClusterDelete(rancherUrl, rancherToken, clusterName, delayHours, insecure, logger) {
+  const safeName = clusterName.replace(/[^a-z0-9-]/g, "-");
+  const cronJobName = `ttl-delete-${safeName}`;
+  const secretName = `ttl-token-${safeName}`;
+  const ns = "default";
+  const insecureFlag = insecure ? "-k" : "";
+
+  const deleteAtEpoch = Math.floor(Date.now() / 1000) + delayHours * 3600;
+  const deleteAtISO = new Date(deleteAtEpoch * 1000).toISOString();
+  logger.info(`Scheduling deletion of '${clusterName}' at ${deleteAtISO} (in ${delayHours}h) via CronJob '${cronJobName}'...`);
+
+  const secretBody = {
+    apiVersion: "v1", kind: "Secret",
+    metadata: { name: secretName, namespace: ns, labels: { "swamp/ttl-delete": "true", "swamp/cluster": safeName } },
+    stringData: { RANCHER_TOKEN: rancherToken, DELETE_AT: String(deleteAtEpoch) },
+  };
+  await rancherRequest(rancherUrl, rancherToken, "DELETE",
+    `/k8s/clusters/local/api/v1/namespaces/${ns}/secrets/${secretName}`, null, insecure).catch(() => {});
+  await rancherRequest(rancherUrl, rancherToken, "POST",
+    `/k8s/clusters/local/api/v1/namespaces/${ns}/secrets`, secretBody, insecure);
+
+  await rancherRequest(rancherUrl, rancherToken, "DELETE",
+    `/k8s/clusters/local/apis/batch/v1/namespaces/${ns}/cronjobs/${cronJobName}`,
+    { propagationPolicy: "Foreground" }, insecure).catch(() => {});
+
+  const script = [
+    `NOW=$(date +%s)`,
+    `echo "Current time: $NOW, delete at: $DELETE_AT"`,
+    `if [ "$NOW" -lt "$DELETE_AT" ]; then echo "Not yet time to delete. Exiting."; exit 0; fi`,
+    `echo "TTL expired. Deleting cluster '${clusterName}'..."`,
+    `STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "${rancherUrl}/v1/provisioning.cattle.io.clusters/fleet-default/${clusterName}" -H "Authorization: Bearer $RANCHER_TOKEN" ${insecureFlag})`,
+    `echo "Rancher API responded: $STATUS"`,
+    `if [ "$STATUS" = "200" ] || [ "$STATUS" = "204" ] || [ "$STATUS" = "404" ]; then echo "Cluster deleted or already gone. Cleaning up CronJob..."; curl -s -o /dev/null -X DELETE "${rancherUrl}/k8s/clusters/local/apis/batch/v1/namespaces/${ns}/cronjobs/${cronJobName}" -H "Authorization: Bearer $RANCHER_TOKEN" ${insecureFlag}; curl -s -o /dev/null -X DELETE "${rancherUrl}/k8s/clusters/local/api/v1/namespaces/${ns}/secrets/${secretName}" -H "Authorization: Bearer $RANCHER_TOKEN" ${insecureFlag}; fi`,
+  ].join(" && ");
+
+  const cronJobBody = {
+    apiVersion: "batch/v1", kind: "CronJob",
+    metadata: { name: cronJobName, namespace: ns, labels: { "swamp/ttl-delete": "true", "swamp/cluster": safeName } },
+    spec: {
+      schedule: "*/15 * * * *",
+      concurrencyPolicy: "Forbid",
+      successfulJobsHistoryLimit: 1,
+      failedJobsHistoryLimit: 3,
+      jobTemplate: {
+        spec: {
+          backoffLimit: 1,
+          ttlSecondsAfterFinished: 300,
+          template: {
+            metadata: { labels: { "swamp/ttl-delete": "true", "swamp/cluster": safeName } },
+            spec: {
+              restartPolicy: "Never",
+              containers: [{
+                name: "delete",
+                image: "curlimages/curl:latest",
+                command: ["sh", "-c", script],
+                env: [
+                  { name: "RANCHER_TOKEN", valueFrom: { secretKeyRef: { name: secretName, key: "RANCHER_TOKEN" } } },
+                  { name: "DELETE_AT", valueFrom: { secretKeyRef: { name: secretName, key: "DELETE_AT" } } },
+                ],
+              }],
+            },
+          },
+        },
+      },
+    },
+  };
+  await rancherRequest(rancherUrl, rancherToken, "POST",
+    `/k8s/clusters/local/apis/batch/v1/namespaces/${ns}/cronjobs`, cronJobBody, insecure);
+
+  logger.info(`CronJob '${cronJobName}' created. Cluster '${clusterName}' will be deleted after ${deleteAtISO}.`);
+}
+
+async function installTailscaleOperator(rancherUrl, rancherToken, mgmtClusterId, clientId, clientSecret, insecure, logger) {
+  logger.info(`Fetching kubeconfig for cluster '${mgmtClusterId}'...`);
+  const kubeconfigData = await rancherRequest(rancherUrl, rancherToken, "POST",
+    `/v3/clusters/${mgmtClusterId}?action=generateKubeconfig`, {}, insecure);
+  const kubeconfig = kubeconfigData.config;
+  if (!kubeconfig) throw new Error("generateKubeconfig returned no config");
+
+  const tmpKubeconfig = await Deno.makeTempFile({ suffix: ".yaml" });
+  try {
+    await Deno.writeTextFile(tmpKubeconfig, kubeconfig);
+
+    const env = { ...Deno.env.toObject(), KUBECONFIG: tmpKubeconfig };
+
+    // Add tailscale helm repo
+    logger.info("Adding tailscale helm repo...");
+    const repoAdd = new Deno.Command("helm", {
+      args: ["repo", "add", "tailscale", "https://pkgs.tailscale.com/helmcharts"],
+      env, stdout: "piped", stderr: "piped",
+    });
+    const repoResult = await repoAdd.output();
+    logger.info(dec.decode(repoResult.stdout) + dec.decode(repoResult.stderr));
+
+    const repoUpdate = new Deno.Command("helm", {
+      args: ["repo", "update"],
+      env, stdout: "piped", stderr: "piped",
+    });
+    await repoUpdate.output();
+
+    // Install tailscale-operator
+    logger.info("Installing tailscale-operator...");
+    const helmInstall = new Deno.Command("helm", {
+      args: [
+        "upgrade", "--install", "tailscale-operator", "tailscale/tailscale-operator",
+        "--namespace", "tailscale",
+        "--create-namespace",
+        "--set", `oauth.clientId=${clientId}`,
+        "--set", `oauth.clientSecret=${clientSecret}`,
+        "--wait", "--timeout", "600s",
+      ],
+      env, stdout: "piped", stderr: "piped",
+    });
+    const installResult = await helmInstall.output();
+    const stdout = dec.decode(installResult.stdout);
+    const stderr = dec.decode(installResult.stderr);
+    logger.info(stdout + stderr);
+    if (installResult.code !== 0) {
+      throw new Error(`helm install tailscale-operator failed: ${stderr}`);
+    }
+    logger.info("tailscale-operator installed successfully.");
+  } finally {
+    await Deno.remove(tmpKubeconfig).catch(() => {});
+  }
+}
+
 async function fetchAndSaveSshKeys(rancherUrl, rancherToken, clusterName, insecure, logger) {
   const namespace = "fleet-default";
   const savedKeys = [];
@@ -435,6 +561,9 @@ export const model = {
         kubernetesVersion: z.string().optional().describe("Kubernetes version (default: Rancher default)"),
         waitSeconds: z.number().int().optional().describe("Max seconds to wait for cluster active (default: 900)"),
         tailscaleAuthKey: z.string().optional().describe("Tailscale auth key — when provided, nodes will auto-join the tailnet via cloud-init"),
+        tailscaleOperatorClientId: z.string().optional().describe("Tailscale OAuth client ID — when provided, tailscale-operator is installed on the cluster"),
+        tailscaleOperatorClientSecret: z.string().optional().describe("Tailscale OAuth client secret — required when tailscaleOperatorClientId is set"),
+        deleteAfterHours: z.number().optional().describe("Schedule cluster auto-deletion after this many hours (default: 12, set to 0 to disable)"),
       }),
       execute: async (args, context) => {
         const { rancherUrl, rancherToken, insecure } = context.globalArgs;
@@ -448,7 +577,28 @@ export const model = {
         const namespace = "fleet-default";
         const machineConfigName = `${clusterName}-openstack`;
 
-        // 1. Create cloud credential (v3 API — stores password as a k8s secret)
+        // 1. Ensure the OpenStack node driver is active
+        context.logger.info("Checking OpenStack node driver status...");
+        const driverResp = await rancherRequest(rancherUrl, rancherToken, "GET",
+          "/v3/nodedrivers/openstack", null, insecure).catch(() => null);
+        if (driverResp && driverResp.state !== "active") {
+          context.logger.info(`OpenStack driver state is '${driverResp.state}' — activating...`);
+          await rancherRequest(rancherUrl, rancherToken, "POST",
+            "/v3/nodedrivers/openstack?action=activate", {}, insecure);
+          const driverDeadline = Date.now() + 120_000;
+          while (Date.now() < driverDeadline) {
+            await new Promise((r) => setTimeout(r, 3_000));
+            const d = await rancherRequest(rancherUrl, rancherToken, "GET",
+              "/v3/nodedrivers/openstack", null, insecure).catch(() => null);
+            context.logger.info(`OpenStack driver state: ${d?.state ?? "unknown"}`);
+            if (d?.state === "active") break;
+          }
+          context.logger.info("OpenStack driver is active.");
+        } else {
+          context.logger.info("OpenStack driver is already active.");
+        }
+
+        // 2. Create cloud credential (v3 API — stores password as a k8s secret)
         context.logger.info("Creating OpenStack cloud credential in Rancher...");
         const cred = await rancherRequest(rancherUrl, rancherToken, "POST", "/v3/cloudcredentials", {
           name: `${clusterName}-cred`,
@@ -464,7 +614,7 @@ export const model = {
           createdAt: cred.created ?? new Date().toISOString(),
         });
 
-        // 2. Determine Kubernetes version — required by Rancher's admission webhook
+        // 3. Determine Kubernetes version — required by Rancher's admission webhook
         let kubernetesVersion = args.kubernetesVersion ?? "";
         if (!kubernetesVersion) {
           context.logger.info("No kubernetesVersion specified — fetching Rancher default...");
@@ -481,7 +631,7 @@ export const model = {
           throw new Error("Could not determine a kubernetesVersion — please specify one explicitly");
         }
 
-        // 3. Delete existing cluster first and wait for it to be fully gone.
+        // 4. Delete existing cluster first and wait for it to be fully gone.
         // This must happen before deleting the machine config, because the cluster holds
         // a reference to it — the machine config deletion won't complete while the cluster exists.
         context.logger.info(`Checking for existing cluster '${clusterName}'...`);
@@ -501,7 +651,7 @@ export const model = {
           await new Promise((r) => setTimeout(r, 10_000));
         }
 
-        // 4. Now delete the machine config and wait for it to be fully gone.
+        // 5. Now delete the machine config and wait for it to be fully gone.
         context.logger.info("Deleting existing machine config (if any)...");
         await rancherRequest(rancherUrl, rancherToken, "DELETE",
           `/v1/rke-machine-config.cattle.io.openstackconfigs/${namespace}/${machineConfigName}`,
@@ -519,7 +669,7 @@ export const model = {
           await new Promise((r) => setTimeout(r, 5_000));
         }
 
-        // 5. Create new machine config
+        // 6. Create new machine config
         context.logger.info("Creating OpenStack machine config in Rancher...");
         // Build cloud-init user data (stored in userDataFile field of OpenstackConfig)
         // Escape password for embedding in YAML (handle single quotes)
@@ -588,7 +738,7 @@ export const model = {
         if (args.tailscaleAuthKey) {
           userDataLines.push(
             `curl -fsSL https://tailscale.com/install.sh | sh`,
-            `tailscale up --auth-key=${args.tailscaleAuthKey} --accept-routes`,
+            `tailscale up --auth-key=${args.tailscaleAuthKey} --accept-routes --accept-dns`,
             `# Wait up to 120s for Tailscale to assign an IP, then write RKE2 tls-san drop-in`,
             `ELAPSED=0`,
             `TS_IP=$(tailscale ip -4 2>/dev/null)`,
@@ -621,6 +771,7 @@ export const model = {
             volumeSize: String(args.rootDiskSizeGb ?? 20),
             volumeType: "high-speed",
             bootFromVolume: true,
+            activeTimeout: "600",
             userDataFile,
           }, insecure);
         const machineConfigId = machineConfig.metadata?.name ?? machineConfigName;
@@ -704,6 +855,20 @@ export const model = {
               await fetchAndSaveSshKeys(rancherUrl, rancherToken, clusterName, insecure ?? false, context.logger);
               const mgmtId = s.status?.clusterName ?? clusterName;
               const k8sVer = s.spec?.kubernetesVersion ?? kubernetesVersion ?? "unknown";
+              // Install Tailscale operator if credentials were provided
+              if (args.tailscaleOperatorClientId && args.tailscaleOperatorClientSecret) {
+                await installTailscaleOperator(
+                  rancherUrl, rancherToken, mgmtId,
+                  args.tailscaleOperatorClientId, args.tailscaleOperatorClientSecret,
+                  insecure ?? false, context.logger,
+                );
+              }
+              // Schedule auto-deletion (default 12h, disabled if deleteAfterHours === 0)
+              const deleteAfterHours = args.deleteAfterHours ?? 12;
+              if (deleteAfterHours > 0) {
+                context.logger.info(`Scheduling auto-deletion of '${clusterName}' in ${deleteAfterHours}h...`);
+                await scheduleClusterDelete(rancherUrl, rancherToken, clusterName, deleteAfterHours, insecure ?? false, context.logger);
+              }
               const h = await context.writeResource("cluster", "cluster", {
                 id: mgmtId, name: clusterName, state: "active", kubernetesVersion: k8sVer, nodeCount: totalNodes,
               });
@@ -763,85 +928,7 @@ export const model = {
       execute: async (args, context) => {
         const { rancherUrl, rancherToken, insecure } = context.globalArgs;
         const delayHours = args.delayHours ?? 12;
-        const safeName = args.clusterName.replace(/[^a-z0-9-]/g, "-");
-        const cronJobName = `ttl-delete-${safeName}`;
-        const secretName = `ttl-token-${safeName}`;
-        const ns = "default";
-        const insecureFlag = insecure ? "-k" : "";
-
-        // Compute the deletion timestamp (epoch seconds)
-        const deleteAtEpoch = Math.floor(Date.now() / 1000) + delayHours * 3600;
-        const deleteAtISO = new Date(deleteAtEpoch * 1000).toISOString();
-
-        context.logger.info(`Scheduling deletion of '${args.clusterName}' at ${deleteAtISO} (in ${delayHours}h) via CronJob '${cronJobName}'...`);
-
-        // 1. Upsert the secret (token + deletion timestamp)
-        const secretBody = {
-          apiVersion: "v1", kind: "Secret",
-          metadata: { name: secretName, namespace: ns, labels: { "swamp/ttl-delete": "true", "swamp/cluster": safeName } },
-          stringData: { RANCHER_TOKEN: rancherToken, DELETE_AT: String(deleteAtEpoch) },
-        };
-        await rancherRequest(rancherUrl, rancherToken, "DELETE",
-          `/k8s/clusters/local/api/v1/namespaces/${ns}/secrets/${secretName}`, null, insecure).catch(() => {});
-        await rancherRequest(rancherUrl, rancherToken, "POST",
-          `/k8s/clusters/local/api/v1/namespaces/${ns}/secrets`, secretBody, insecure);
-
-        // 2. Delete any existing CronJob with this name
-        await rancherRequest(rancherUrl, rancherToken, "DELETE",
-          `/k8s/clusters/local/apis/batch/v1/namespaces/${ns}/cronjobs/${cronJobName}`,
-          { propagationPolicy: "Foreground" }, insecure).catch(() => {});
-
-        // 3. Create the CronJob — runs every 15 min, checks if deletion time has passed
-        const script = [
-          `NOW=$(date +%s)`,
-          `echo "Current time: $NOW, delete at: $DELETE_AT"`,
-          `if [ "$NOW" -lt "$DELETE_AT" ]; then echo "Not yet time to delete. Exiting."; exit 0; fi`,
-          `echo "TTL expired. Deleting cluster '${args.clusterName}'..."`,
-          `STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "${rancherUrl}/v1/provisioning.cattle.io.clusters/fleet-default/${args.clusterName}" -H "Authorization: Bearer $RANCHER_TOKEN" ${insecureFlag})`,
-          `echo "Rancher API responded: $STATUS"`,
-          `if [ "$STATUS" = "200" ] || [ "$STATUS" = "204" ] || [ "$STATUS" = "404" ]; then echo "Cluster deleted or already gone. Cleaning up CronJob..."; curl -s -o /dev/null -X DELETE "${rancherUrl}/k8s/clusters/local/apis/batch/v1/namespaces/${ns}/cronjobs/${cronJobName}" -H "Authorization: Bearer $RANCHER_TOKEN" ${insecureFlag}; curl -s -o /dev/null -X DELETE "${rancherUrl}/k8s/clusters/local/api/v1/namespaces/${ns}/secrets/${secretName}" -H "Authorization: Bearer $RANCHER_TOKEN" ${insecureFlag}; fi`,
-        ].join(" && ");
-
-        const cronJobBody = {
-          apiVersion: "batch/v1", kind: "CronJob",
-          metadata: {
-            name: cronJobName, namespace: ns,
-            labels: { "swamp/ttl-delete": "true", "swamp/cluster": safeName },
-          },
-          spec: {
-            schedule: "*/15 * * * *",
-            concurrencyPolicy: "Forbid",
-            successfulJobsHistoryLimit: 1,
-            failedJobsHistoryLimit: 3,
-            jobTemplate: {
-              spec: {
-                backoffLimit: 1,
-                ttlSecondsAfterFinished: 300,
-                template: {
-                  metadata: { labels: { "swamp/ttl-delete": "true", "swamp/cluster": safeName } },
-                  spec: {
-                    restartPolicy: "Never",
-                    containers: [{
-                      name: "delete",
-                      image: "curlimages/curl:latest",
-                      command: ["sh", "-c", script],
-                      env: [
-                        { name: "RANCHER_TOKEN", valueFrom: { secretKeyRef: { name: secretName, key: "RANCHER_TOKEN" } } },
-                        { name: "DELETE_AT", valueFrom: { secretKeyRef: { name: secretName, key: "DELETE_AT" } } },
-                      ],
-                    }],
-                  },
-                },
-              },
-            },
-          },
-        };
-        await rancherRequest(rancherUrl, rancherToken, "POST",
-          `/k8s/clusters/local/apis/batch/v1/namespaces/${ns}/cronjobs`, cronJobBody, insecure);
-
-        context.logger.info(`CronJob '${cronJobName}' created (runs every 15 min). Cluster '${args.clusterName}' will be deleted after ${deleteAtISO}.`);
-        context.logger.info(`Monitor with: kubectl get cronjob ${cronJobName} -n ${ns}`);
-
+        await scheduleClusterDelete(rancherUrl, rancherToken, args.clusterName, delayHours, insecure ?? false, context.logger);
         return { dataHandles: [] };
       },
     },

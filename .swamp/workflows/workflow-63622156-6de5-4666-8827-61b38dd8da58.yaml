@@ -1,0 +1,105 @@
+id: 63622156-6de5-4666-8827-61b38dd8da58
+name: test-vm-provisioning
+description: Integration test — provision a VM, verify cloud-init ran, then destroy it
+tags: {}
+version: 1
+inputs:
+  properties:
+    vmName:
+      type: string
+      description: Name (and hostname) for the ephemeral test VM
+      default: swamp-ci-test
+    ubuntuVersion:
+      type: string
+      enum: ["24.04", "22.04", "20.04"]
+      description: Ubuntu cloud image version to test
+      default: "24.04"
+    username:
+      type: string
+      description: Unix username to create via cloud-init
+      default: testuser
+    sshPublicKey:
+      type: string
+      description: SSH public key to inject into the test VM
+    userSshPrivateKey:
+      type: string
+      description: Private SSH key corresponding to sshPublicKey (used for verification)
+    timeoutSeconds:
+      type: integer
+      description: Max seconds to wait for the VM to boot (default 300)
+      default: 300
+    keepVm:
+      type: boolean
+      description: If true, leave the VM running after the test instead of destroying it
+      default: false
+  required:
+    - sshPublicKey
+    - userSshPrivateKey
+jobs:
+  - name: provision
+    description: Provision an ephemeral Ubuntu VM with cloud-init
+    dependsOn: []
+    weight: 0
+    steps:
+      - name: provision
+        description: Create VM, build and upload cloud-init ISO, start VM
+        dependsOn: []
+        weight: 0
+        task:
+          type: model_method
+          modelIdOrName: unraid-vm-provision
+          methodName: provision
+          inputs:
+            name: ${{ inputs.vmName }}
+            ubuntuVersion: ${{ inputs.ubuntuVersion }}
+            username: ${{ inputs.username }}
+            sshPublicKey: ${{ inputs.sshPublicKey }}
+            cpus: 2
+            memoryMiB: 2048
+            diskSizeGb: 10
+
+  - name: verify
+    description: Wait for the VM to boot and confirm cloud-init applied correctly
+    dependsOn:
+      - job: provision
+        condition:
+          type: succeeded
+    weight: 0
+    steps:
+      - name: verify
+        description: Poll for IP, SSH in, and assert hostname, user, and cloud-init status
+        dependsOn: []
+        weight: 0
+        task:
+          type: model_method
+          modelIdOrName: unraid-vm-provision
+          methodName: verify
+          inputs:
+            name: ${{ inputs.vmName }}
+            expectedHostname: ${{ inputs.vmName }}
+            expectedUsername: ${{ inputs.username }}
+            userSshPrivateKey: ${{ inputs.userSshPrivateKey }}
+            timeoutSeconds: ${{ inputs.timeoutSeconds }}
+
+  - name: destroy
+    description: Destroy the test VM regardless of verify outcome
+    dependsOn:
+      - job: verify
+        condition:
+          type: completed
+      - job: provision
+        condition:
+          type: completed
+    weight: 0
+    steps:
+      - name: destroy
+        description: Stop VM, undefine from libvirt, and remove disk files
+        dependsOn: []
+        weight: 0
+        task:
+          type: model_method
+          modelIdOrName: unraid-vm-provision
+          methodName: destroy
+          inputs:
+            name: ${{ inputs.vmName }}
+            keepVm: ${{ inputs.keepVm }}

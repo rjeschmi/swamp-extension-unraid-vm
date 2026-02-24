@@ -1,0 +1,33 @@
+id: 4226c866-685e-440d-a2a2-19ae5490a84a
+name: delete-cluster-after
+description: Deploy a CronJob in the Rancher local cluster that deletes a provisioned cluster after a configurable TTL
+tags: {}
+version: 1
+inputs:
+  properties:
+    clusterName:
+      type: string
+      description: Name of the cluster to delete
+    ttlHours:
+      type: number
+      description: Hours to wait before deletion (default 12)
+      default: 12
+  required:
+    - clusterName
+jobs:
+  - name: schedule
+    description: Schedule cluster deletion via a CronJob in the Rancher local cluster
+    dependsOn: []
+    weight: 0
+    steps:
+      - name: schedule-delete
+        description: Create the TTL CronJob in the local cluster
+        dependsOn: []
+        weight: 0
+        task:
+          type: model_method
+          modelIdOrName: openstack-rancher
+          methodName: scheduleDelete
+          inputs:
+            clusterName: ${{ inputs.clusterName }}
+            delayHours: ${{ inputs.ttlHours }}

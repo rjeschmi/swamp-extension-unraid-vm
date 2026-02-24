@@ -1,0 +1,7 @@
+id: a14e053d-4c12-4c93-aa6e-5acfd6b9fd16
+name: openstack-secrets
+type: local_encryption
+config:
+  auto_generate: true
+  base_dir: /Users/rob/swamp/swamp-extension-unraid-vm
+createdAt: '2026-02-22T16:29:33.139Z'

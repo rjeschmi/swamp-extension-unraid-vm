@@ -1,0 +1,22 @@
+type: '@rjeschmi/rancher-kubeconfig'
+typeVersion: 2026.02.23.1
+id: 1225610d-29e3-46bc-a36b-8406c1eacc61
+name: rancher-kubeconfig
+version: 1
+tags: {}
+globalArguments:
+  sshHost: tower.humpback-salary.ts.net
+  sshUser: root
+  sshPrivateKey: ${{ vault.get(unraid-secrets, SSH_PRIVATE_KEY) }}
+  vmSshUser: rancher
+  vmSshPrivateKey: ${{ vault.get(unraid-secrets, RANCHER_VM_SSH_PRIVATE_KEY) }}
+inputs:
+  properties:
+    vmName:
+      type: string
+      description: VM name to fetch kubeconfig from
+      default: rancher
+methods:
+  fetch:
+    arguments:
+      vmName: ${{ inputs.vmName }}

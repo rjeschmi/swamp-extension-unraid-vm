@@ -1,0 +1,119 @@
+id: 2b4a3118-c3ea-47c1-ba9c-4fa603801409
+name: provision-openstack-cluster
+description: Create OpenStack credential + node template in Rancher, then provision an RKE cluster — all in one step
+tags: {}
+version: 1
+inputs:
+  properties:
+    clusterName:
+      type: string
+      description: Name for the RKE cluster
+    flavorName:
+      type: string
+      description: OpenStack flavor for cluster nodes (e.g. d2-2, m1.medium)
+    imageName:
+      type: string
+      description: OpenStack image name (mutually exclusive with imageId)
+    imageId:
+      type: string
+      description: OpenStack image UUID (mutually exclusive with imageName)
+    networkName:
+      type: string
+      description: OpenStack network name
+    keypairName:
+      type: string
+      description: OpenStack keypair name for SSH access to nodes
+      default: ""
+    secGroups:
+      type: string
+      description: Comma-separated security group names
+      default: default
+    sshUser:
+      type: string
+      description: SSH user on provisioned nodes
+      default: ubuntu
+    rootDiskSizeGb:
+      type: integer
+      description: Root disk size in GB
+      default: 20
+    controlPlaneCount:
+      type: integer
+      description: Number of control plane + etcd nodes
+      default: 1
+    workerCount:
+      type: integer
+      description: Number of worker nodes
+      default: 2
+    kubernetesVersion:
+      type: string
+      description: Kubernetes version (leave empty for Rancher default)
+      default: ""
+    tailscaleAuthKey:
+      type: string
+      description: Tailscale auth key for nodes to auto-join tailnet (leave empty to skip)
+      default: ""
+    deleteAfterHours:
+      type: number
+      description: Auto-delete cluster after this many hours (default 12, set to 0 to disable)
+      default: 12
+    authUrl:
+      type: string
+      description: OpenStack Keystone auth URL
+      default: https://auth.cloud.ovh.net/v3
+    username:
+      type: string
+      description: OpenStack username
+      default: user-CDEExRrfveQa
+    tenantName:
+      type: string
+      description: OpenStack project/tenant name
+      default: "0815908386929626"
+    domainName:
+      type: string
+      description: OpenStack domain name
+      default: Default
+    region:
+      type: string
+      description: OpenStack region
+      default: BHS5
+  required:
+    - clusterName
+    - flavorName
+    - networkName
+jobs:
+  - name: provision
+    description: Create credential, node template, and RKE cluster on OpenStack
+    dependsOn: []
+    weight: 0
+    steps:
+      - name: provision-all
+        description: End-to-end OpenStack cluster provisioning
+        dependsOn: []
+        weight: 0
+        task:
+          type: model_method
+          modelIdOrName: openstack-rancher
+          methodName: provisionAll
+          inputs:
+            clusterName: ${{ inputs.clusterName }}
+            authUrl: ${{ inputs.authUrl }}
+            username: ${{ inputs.username }}
+            password: ${{ vault.get(openstack-secrets, OS_PASSWORD) }}
+            tenantName: ${{ inputs.tenantName }}
+            domainName: ${{ inputs.domainName }}
+            region: ${{ inputs.region }}
+            flavorName: ${{ inputs.flavorName }}
+            imageId: ${{ inputs.imageId }}
+            networkName: ${{ inputs.networkName }}
+            secGroups: ${{ inputs.secGroups }}
+            keypairName: ${{ inputs.keypairName }}
+            sshUser: ${{ inputs.sshUser }}
+            rootDiskSizeGb: ${{ inputs.rootDiskSizeGb }}
+            controlPlaneCount: ${{ inputs.controlPlaneCount }}
+            workerCount: ${{ inputs.workerCount }}
+            kubernetesVersion: ${{ inputs.kubernetesVersion }}
+            tailscaleAuthKey: ${{ vault.get(openstack-secrets, TAILSCALE_AUTH_KEY) }}
+            tailscaleOperatorClientId: ${{ vault.get(unraid-secrets, TAILSCALE_OPERATOR_CLIENT_ID) }}
+            tailscaleOperatorClientSecret: ${{ vault.get(unraid-secrets, TAILSCALE_OPERATOR_CLIENT_SECRET) }}
+            waitSeconds: 3600
+            deleteAfterHours: ${{ inputs.deleteAfterHours }}
