@@ -11,3 +11,9 @@
 .claude/
 
 .swamp
+
+# OpenStack credentials
+openrc.sh
+
+# Vault data
+vaults/

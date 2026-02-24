@@ -33,7 +33,8 @@
       "WebSearch",
       "Bash(head:*)",
       "Bash(python3:*)",
-      "Bash(npm info:*)"
+      "Bash(npm info:*)",
+      "Bash(swamp workflow:*)"
     ]
   }
 }

@@ -119,6 +119,144 @@ swamp model method run unraid-vm-provision provision
 swamp model method run unraid-vm-provision destroy
 ```
 
+## Rancher VM Kubeconfig
+
+The `@rjeschmi/rancher-kubeconfig` model fetches `/etc/rancher/k3s/k3s.yaml`
+from the Rancher VM over SSH, rewrites the server address from `127.0.0.1` to
+the VM's real IP, and stores it as a resource.
+
+### Global arguments
+
+| Argument          | Description |
+|-------------------|-------------|
+| `sshHost`         | Unraid SSH hostname or IP |
+| `sshUser`         | SSH username (typically `root`) |
+| `sshPrivateKey`   | SSH private key for Unraid |
+| `vmSshUser`       | Username on the VM |
+| `vmSshPrivateKey` | SSH private key for the VM user |
+
+### Methods
+
+**`fetch`** — Discovers the VM's IP via `virsh domifaddr`, SSHes in, reads the
+kubeconfig, rewrites the server URL, and stores the result.
+
+| Argument  | Description |
+|-----------|-------------|
+| `vmName`  | VM name (used to look up the IP via virsh on Unraid) |
+
+### Usage
+
+```bash
+# Fetch and store the kubeconfig
+swamp model method run rancher-kubeconfig fetch --json
+
+# Store the kubeconfig in vault for use outside swamp
+KUBECONFIG=$(swamp model output data <output-id> --json | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['kubeconfig'])")
+swamp vault put unraid-secrets "RANCHER_KUBECONFIG=$KUBECONFIG" -f
+```
+
+The kubeconfig is stored in the `unraid-secrets` vault under `RANCHER_KUBECONFIG`
+and can be used directly with `kubectl`:
+
+```bash
+# Use via vault expression in a workflow or model
+kubeconfig: ${{ vault.get(unraid-secrets, RANCHER_KUBECONFIG) }}
+
+# Export to a local file for direct kubectl use
+OUTPUT_ID=$(swamp model output search rancher-kubeconfig --json | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['results'][0]['id'])")
+swamp model output data "$OUTPUT_ID" --json | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['kubeconfig'])" > ~/.kube/rancher.yaml
+export KUBECONFIG=~/.kube/rancher.yaml
+kubectl get nodes
+```
+
+Reference the kubeconfig from other models using a CEL expression:
+
+```yaml
+kubeconfig: ${{ model.rancher-kubeconfig.resource.kubeconfig.rancher.attributes.kubeconfig }}
+```
+
+---
+
+## Rancher OpenStack Cluster Provisioning
+
+The `provision-openstack-cluster` workflow creates an RKE cluster on OpenStack
+via Rancher end-to-end: cloud credential → node template → cluster.
+
+### Prerequisites
+
+Store your OpenStack password and Tailscale auth key in a vault:
+
+```bash
+swamp vault create local_encryption openstack-secrets
+swamp vault put openstack-secrets OS_PASSWORD=<your-openstack-password>
+swamp vault put openstack-secrets TAILSCALE_AUTH_KEY=<your-tailscale-key>  # optional
+swamp vault put openstack-secrets RANCHER_TOKEN=<your-rancher-api-token>
+```
+
+Create the model instance (only needed once):
+
+```bash
+swamp model create @rjeschmi/rancher-openstack openstack-rancher
+# Edit models/openstack-rancher/definition.yaml to set rancherUrl and rancherToken vault ref
+```
+
+### Run the workflow
+
+```bash
+swamp workflow run provision-openstack-cluster --input '{
+  "clusterName": "my-cluster",
+  "flavorName": "d2-2",
+  "imageId": "49ccfac7-cfc6-498c-8c89-a86df5e31db8",
+  "networkName": "test",
+  "controlPlaneCount": 1,
+  "workerCount": 1
+}' --json
+```
+
+All other inputs default to OVH BHS5 region with `ubuntu` SSH user and 20 GB
+root disk. Override any of these as needed:
+
+| Input              | Default                       | Description                              |
+|--------------------|-------------------------------|------------------------------------------|
+| `clusterName`      | _(required)_                  | RKE cluster name                         |
+| `flavorName`       | _(required)_                  | OpenStack flavor (e.g. `d2-2`)           |
+| `networkName`      | _(required)_                  | OpenStack network name                   |
+| `imageId`          |                               | OpenStack image UUID                     |
+| `imageName`        |                               | OpenStack image name (alt. to imageId)   |
+| `controlPlaneCount`| `1`                           | Control plane + etcd node count          |
+| `workerCount`      | `2`                           | Worker node count                        |
+| `rootDiskSizeGb`   | `20`                          | Root disk size in GB                     |
+| `sshUser`          | `ubuntu`                      | SSH user on provisioned nodes            |
+| `keypairName`      | `""`                          | OpenStack keypair name for SSH access    |
+| `secGroups`        | `default`                     | Comma-separated security group names     |
+| `kubernetesVersion`| `""`                          | Kubernetes version (empty = Rancher default) |
+| `authUrl`          | `https://auth.cloud.ovh.net/v3` | OpenStack Keystone URL                 |
+| `username`         | `user-CDEExRrfveQa`           | OpenStack username                       |
+| `tenantName`       | `0815908386929626`            | OpenStack project/tenant name            |
+| `domainName`       | `Default`                     | OpenStack domain name                    |
+| `region`           | `BHS5`                        | OpenStack region                         |
+
+### Delete and redeploy
+
+```bash
+# Delete the cluster from Rancher
+swamp model method run openstack-rancher deleteCluster --input '{"clusterName": "my-cluster"}' --json
+
+# Redeploy with the same inputs
+swamp workflow run provision-openstack-cluster --input '{"clusterName": "my-cluster", ...}' --json
+```
+
+Provisioning typically takes ~15 minutes. Check progress with:
+
+```bash
+swamp workflow history get provision-openstack-cluster --json
+```
+
+---
+
 ## Testing
 
 The `test-vm-provisioning` workflow runs a full integration test: provisions an

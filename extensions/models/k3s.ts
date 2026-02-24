@@ -12,9 +12,6 @@ const ClusterSchema = z.object({
   vmName: z.string(),
   vmIp: z.string(),
   k3sVersion: z.string(),
-  rancherVersion: z.string(),
-  rancherUrl: z.string(),
-  bootstrapPassword: z.string(),
 });
 
 const dec = new TextDecoder();
@@ -46,9 +43,10 @@ async function runSsh(keyFile, user, host, command, { allowFailure = false } = {
   return { stdout, stderr, code: result.code };
 }
 
+
 export const model = {
   type: "@rjeschmi/rancher",
-  version: "2026.02.21.1",
+  version: "2026.02.23.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     cluster: {
@@ -60,16 +58,14 @@ export const model = {
   },
   methods: {
     install: {
-      description: "Install k3s + Rancher on a provisioned VM via SSH",
+      description: "Install k3s on a provisioned VM via SSH and wait for the node to be ready",
       arguments: z.object({
         vmName: z.string().describe("VM name, used to discover IP via virsh"),
-        rancherVersion: z.string().optional().describe("Rancher Helm chart version (default: latest)"),
         timeoutSeconds: z.number().int().optional().describe("Max seconds to wait (default: 600)"),
       }),
       execute: async (args, context) => {
         const { sshHost, sshUser, sshPrivateKey, vmSshUser, vmSshPrivateKey } = context.globalArgs;
         const { vmName } = args;
-        const rancherVersion = args.rancherVersion ?? "latest";
         const timeoutMs = (args.timeoutSeconds ?? 600) * 1000;
         const pollInterval = 10_000;
 
@@ -85,7 +81,7 @@ export const model = {
         let vmIp = null;
 
         try {
-          context.logger.info(`Installing Rancher on VM '${vmName}'...`);
+          context.logger.info(`Installing k3s on VM '${vmName}'...`);
           const deadline = Date.now() + timeoutMs;
 
           // 1. Poll virsh for VM IP via guest agent
@@ -127,7 +123,7 @@ export const model = {
 
           const vmSsh = (cmd, opts) => runSsh(vmKeyFile, vmSshUser, vmIp, cmd, opts);
 
-          // 3. Install k3s (Traefik ingress controller included by default)
+          // 3. Install k3s
           context.logger.info("Installing k3s...");
           await vmSsh(`curl -sfL https://get.k3s.io | sh -`);
           context.logger.info("k3s installed.");
@@ -152,68 +148,16 @@ export const model = {
           await vmSsh(`sudo k3s kubectl wait --for=condition=ready node --all --timeout=120s`);
           context.logger.info("k3s node ready.");
 
-          // 5. Install Helm
-          context.logger.info("Installing Helm...");
-          await vmSsh(`curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash`);
-          context.logger.info("Helm installed.");
-
-          // 6. Add Helm repos and update
-          context.logger.info("Adding Helm repos...");
-          await vmSsh(
-            `export KUBECONFIG=/etc/rancher/k3s/k3s.yaml && ` +
-            `sudo -E helm repo add jetstack https://charts.jetstack.io && ` +
-            `sudo -E helm repo add rancher-latest https://releases.rancher.com/server-charts/latest && ` +
-            `sudo -E helm repo update`,
-          );
-
-          // 7. Install cert-manager
-          context.logger.info("Installing cert-manager via Helm...");
-          await vmSsh(
-            `export KUBECONFIG=/etc/rancher/k3s/k3s.yaml && ` +
-            `sudo -E helm upgrade --install cert-manager jetstack/cert-manager ` +
-            `--namespace cert-manager --create-namespace ` +
-            `--set crds.enabled=true --wait --timeout 300s`,
-          );
-          context.logger.info("cert-manager installed.");
-
-          // 8. Install Rancher
-          const hostname = `${vmIp}.sslip.io`;
-          const rancherVersionFlag = rancherVersion === "latest" ? "" : `--version ${rancherVersion}`;
-          context.logger.info(`Installing Rancher at https://${hostname}...`);
-          await vmSsh(
-            `export KUBECONFIG=/etc/rancher/k3s/k3s.yaml && ` +
-            `sudo -E helm upgrade --install rancher rancher-latest/rancher ` +
-            `--namespace cattle-system --create-namespace ` +
-            `--set hostname=${hostname} ` +
-            `--set bootstrapPassword=admin ` +
-            `--set ingress.tls.source=rancher ` +
-            `--set ingress.ingressClassName=traefik ` +
-            `${rancherVersionFlag} --wait --timeout 1200s`,
-          );
-          context.logger.info("Rancher Helm chart installed.");
-
-          // 9. Wait for Rancher rollout
-          context.logger.info("Waiting for Rancher deployment rollout...");
-          await vmSsh(
-            `export KUBECONFIG=/etc/rancher/k3s/k3s.yaml && ` +
-            `sudo -E kubectl -n cattle-system rollout status deploy/rancher --timeout=600s`,
-          );
-
-          const rancherUrl = `https://${hostname}`;
-          context.logger.info(`Rancher is ready at: ${rancherUrl}`);
-          context.logger.info(`Bootstrap password: admin`);
-
           // Detect k3s version
           const k3sVersionRes = await vmSsh(`k3s --version | head -1`, { allowFailure: true });
           const k3sVersion = k3sVersionRes.stdout.replace(/^k3s version /, "").split(" ")[0] || "unknown";
+
+          context.logger.info(`k3s ${k3sVersion} ready on ${vmIp}`);
 
           const handle = await context.writeResource("cluster", vmName, {
             vmName,
             vmIp,
             k3sVersion,
-            rancherVersion,
-            rancherUrl,
-            bootstrapPassword: "admin",
           });
 
           return { dataHandles: [handle] };
