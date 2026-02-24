@@ -3,5 +3,5 @@ name: unraid-secrets
 type: local_encryption
 config:
   auto_generate: true
-  base_dir: /Users/rob/swamp/rancher-ui-plugin
+  base_dir: /Users/rob/swamp/swamp-extension-unraid-vm
 createdAt: '2026-02-21T17:08:45.058Z'
