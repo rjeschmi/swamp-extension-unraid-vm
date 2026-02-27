@@ -1,0 +1,6 @@
+manifestVersion: 1
+name: "@rjeschmi/helm-chart"
+version: "2026.02.27.1"
+description: "Install, upgrade, and uninstall Helm charts on any Kubernetes cluster. Supports repo management, values, and --reuse-values on upgrade."
+models:
+  - helm_chart.ts
