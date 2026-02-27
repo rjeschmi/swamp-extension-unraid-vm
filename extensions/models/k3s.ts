@@ -3,9 +3,9 @@ import { z } from "npm:zod@4";
 const GlobalArgsSchema = z.object({
   sshHost: z.string().describe("Unraid SSH hostname or IP"),
   sshUser: z.string().describe("SSH username (root on Unraid)"),
-  sshPrivateKey: z.string().describe("SSH private key for Unraid"),
+  sshPrivateKey: z.string().optional().describe("SSH private key for Unraid (omit to rely on ssh-agent or ~/.ssh/ defaults)"),
   vmSshUser: z.string().describe("Username on the VM (created by cloud-init)"),
-  vmSshPrivateKey: z.string().describe("SSH private key for the VM user"),
+  vmSshPrivateKey: z.string().optional().describe("SSH private key for the VM user (omit to rely on ssh-agent or ~/.ssh/ defaults)"),
 });
 
 const ClusterSchema = z.object({
@@ -17,9 +17,10 @@ const ClusterSchema = z.object({
 const dec = new TextDecoder();
 
 async function runSsh(keyFile, user, host, command, { allowFailure = false } = {}) {
+  const keyArgs = keyFile ? ["-i", keyFile] : [];
   const proc = new Deno.Command("ssh", {
     args: [
-      "-i", keyFile,
+      ...keyArgs,
       "-o", "StrictHostKeyChecking=no",
       "-o", "UserKnownHostsFile=/dev/null",
       "-o", "BatchMode=yes",
@@ -43,10 +44,21 @@ async function runSsh(keyFile, user, host, command, { allowFailure = false } = {
   return { stdout, stderr, code: result.code };
 }
 
+async function setupKeyFile(privateKey?: string): Promise<string | null> {
+  if (!privateKey) return null;
+  const path = `/tmp/.swamp-k3s-${Date.now()}`;
+  const content = privateKey.endsWith("\n") ? privateKey : privateKey + "\n";
+  await Deno.writeTextFile(path, content, { mode: 0o600 });
+  return path;
+}
+
+async function cleanupKeyFile(path: string | null) {
+  if (path) await Deno.remove(path).catch(() => {});
+}
 
 export const model = {
   type: "@rjeschmi/k3s",
-  version: "2026.02.23.1",
+  version: "2026.02.27.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     cluster: {
@@ -69,12 +81,8 @@ export const model = {
         const timeoutMs = (args.timeoutSeconds ?? 600) * 1000;
         const pollInterval = 10_000;
 
-        const rootKeyFile = `/tmp/.swamp-rancher-root-${Date.now()}`;
-        const vmKeyFile = `/tmp/.swamp-rancher-vm-${Date.now()}`;
-        const rootKeyContent = sshPrivateKey.endsWith("\n") ? sshPrivateKey : sshPrivateKey + "\n";
-        const vmKeyContent = vmSshPrivateKey.endsWith("\n") ? vmSshPrivateKey : vmSshPrivateKey + "\n";
-        await Deno.writeTextFile(rootKeyFile, rootKeyContent, { mode: 0o600 });
-        await Deno.writeTextFile(vmKeyFile, vmKeyContent, { mode: 0o600 });
+        const rootKeyFile = await setupKeyFile(sshPrivateKey);
+        const vmKeyFile = await setupKeyFile(vmSshPrivateKey);
 
         const rootSsh = (cmd, opts) => runSsh(rootKeyFile, sshUser, sshHost, cmd, opts);
 
@@ -162,8 +170,8 @@ export const model = {
 
           return { dataHandles: [handle] };
         } finally {
-          await Deno.remove(rootKeyFile).catch(() => {});
-          await Deno.remove(vmKeyFile).catch(() => {});
+          await cleanupKeyFile(rootKeyFile);
+          await cleanupKeyFile(vmKeyFile);
         }
       },
     },
@@ -177,12 +185,8 @@ export const model = {
         const { sshHost, sshUser, sshPrivateKey, vmSshUser, vmSshPrivateKey } = context.globalArgs;
         const { vmName } = args;
 
-        const rootKeyFile = `/tmp/.swamp-rancher-root-${Date.now()}`;
-        const vmKeyFile = `/tmp/.swamp-rancher-vm-${Date.now()}`;
-        const rootKeyContent = sshPrivateKey.endsWith("\n") ? sshPrivateKey : sshPrivateKey + "\n";
-        const vmKeyContent = vmSshPrivateKey.endsWith("\n") ? vmSshPrivateKey : vmSshPrivateKey + "\n";
-        await Deno.writeTextFile(rootKeyFile, rootKeyContent, { mode: 0o600 });
-        await Deno.writeTextFile(vmKeyFile, vmKeyContent, { mode: 0o600 });
+        const rootKeyFile = await setupKeyFile(sshPrivateKey);
+        const vmKeyFile = await setupKeyFile(vmSshPrivateKey);
 
         try {
           context.logger.info(`Discovering IP for VM '${vmName}'...`);
@@ -199,8 +203,8 @@ export const model = {
           await runSsh(vmKeyFile, vmSshUser, vmIp, `sudo k3s-uninstall.sh`, { allowFailure: true });
           context.logger.info("k3s uninstalled.");
         } finally {
-          await Deno.remove(rootKeyFile).catch(() => {});
-          await Deno.remove(vmKeyFile).catch(() => {});
+          await cleanupKeyFile(rootKeyFile);
+          await cleanupKeyFile(vmKeyFile);
         }
 
         return { dataHandles: [] };
