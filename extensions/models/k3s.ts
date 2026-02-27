@@ -14,6 +14,12 @@ const ClusterSchema = z.object({
   k3sVersion: z.string(),
 });
 
+const KubeconfigSchema = z.object({
+  vmName: z.string(),
+  vmIp: z.string(),
+  kubeconfig: z.string().meta({ sensitive: true }).describe("kubeconfig YAML with server address rewritten to the VM IP"),
+});
+
 const dec = new TextDecoder();
 
 async function runSsh(keyFile, user, host, command, { allowFailure = false } = {}) {
@@ -58,12 +64,18 @@ async function cleanupKeyFile(path: string | null) {
 
 export const model = {
   type: "@rjeschmi/k3s",
-  version: "2026.02.27.1",
+  version: "2026.02.27.2",
   globalArguments: GlobalArgsSchema,
   resources: {
     cluster: {
-      description: "A provisioned Rancher cluster",
+      description: "A provisioned k3s cluster",
       schema: ClusterSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
+    kubeconfig: {
+      description: "kubeconfig for the k3s cluster with server address rewritten to the VM IP",
+      schema: KubeconfigSchema,
       lifetime: "infinite",
       garbageCollection: 10,
     },
@@ -162,13 +174,18 @@ export const model = {
 
           context.logger.info(`k3s ${k3sVersion} ready on ${vmIp}`);
 
-          const handle = await context.writeResource("cluster", vmName, {
-            vmName,
-            vmIp,
-            k3sVersion,
-          });
+          // Fetch kubeconfig and rewrite 127.0.0.1 -> vmIp so it's usable remotely
+          context.logger.info("Fetching kubeconfig...");
+          const kubeconfigRes = await vmSsh(`sudo cat /etc/rancher/k3s/k3s.yaml`);
+          const kubeconfig = kubeconfigRes.stdout.replace(/https:\/\/127\.0\.0\.1:/g, `https://${vmIp}:`);
+          context.logger.info("kubeconfig fetched.");
 
-          return { dataHandles: [handle] };
+          const [clusterHandle, kubeconfigHandle] = await Promise.all([
+            context.writeResource("cluster", vmName, { vmName, vmIp, k3sVersion }),
+            context.writeResource("kubeconfig", vmName, { vmName, vmIp, kubeconfig }),
+          ]);
+
+          return { dataHandles: [clusterHandle, kubeconfigHandle] };
         } finally {
           await cleanupKeyFile(rootKeyFile);
           await cleanupKeyFile(vmKeyFile);
