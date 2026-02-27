@@ -45,7 +45,7 @@ async function withKubeconfig(kubeconfig, fn) {
 
 export const model = {
   type: "@rjeschmi/helm-chart",
-  version: "2026.02.27.1",
+  version: "2026.02.27.2",
   globalArguments: GlobalArgsSchema,
   resources: {
     release: {
