@@ -8,8 +8,10 @@
 # Encryption keyfiles (NEVER commit - allows decrypting secrets)
 .swamp/secrets/
 
-# Claude Code configuration (managed by swamp)
-.claude/
+# Claude Code configuration - ignore most, but track hooks and settings
+.claude/*
+!.claude/hooks/
+!.claude/settings.json
 
 # Vault data
 vaults/
