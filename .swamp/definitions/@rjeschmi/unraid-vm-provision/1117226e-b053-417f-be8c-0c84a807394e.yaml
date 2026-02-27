@@ -38,6 +38,9 @@ methods:
         - hostPath: /mnt/user/home/rob
           tag: shares
           mountPoint: /mnt/shares
+  restart:
+    arguments:
+      name: ${{ inputs.vmName }}
   destroy:
     arguments:
       name: ${{ inputs.vmName }}
