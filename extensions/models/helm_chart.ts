@@ -45,7 +45,7 @@ async function withKubeconfig(kubeconfig, fn) {
 
 export const model = {
   type: "@rjeschmi/helm-chart",
-  version: "2026.02.23.1",
+  version: "2026.02.27.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     release: {
@@ -68,6 +68,7 @@ export const model = {
         values: z.record(z.string(), z.unknown()).optional().describe("Values to set (equivalent to --set key=value)"),
         valuesYaml: z.string().optional().describe("Raw values YAML string (equivalent to -f values.yaml)"),
         createNamespace: z.boolean().optional().describe("Create the namespace if it does not exist (default: true)"),
+        reuseValues: z.boolean().optional().describe("Reuse previously installed values on upgrade, only overriding what is explicitly set (default: false)"),
         waitSeconds: z.number().int().optional().describe("Seconds to wait for resources to be ready (default: 300, 0 to skip)"),
       }),
       execute: async (args, context) => {
@@ -77,6 +78,7 @@ export const model = {
           repoName, repoUrl,
           version, values, valuesYaml,
           createNamespace = true,
+          reuseValues = false,
           waitSeconds = 300,
         } = args;
 
@@ -93,6 +95,7 @@ export const model = {
           const helmArgs = ["upgrade", "--install", releaseName, chart, "--namespace", namespace];
 
           if (createNamespace) helmArgs.push("--create-namespace");
+          if (reuseValues) helmArgs.push("--reuse-values");
           if (version) helmArgs.push("--version", version);
 
           if (values) {
