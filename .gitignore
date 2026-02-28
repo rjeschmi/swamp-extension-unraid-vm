@@ -3,6 +3,8 @@
 .swamp/outputs/
 .swamp/workflow-runs/
 .swamp/workflows-evaluated/
+.swamp/definitions-evaluated/
+.swamp/bundles/
 .swamp/telemetry/
 
 # Encryption keyfiles (NEVER commit - allows decrypting secrets)
