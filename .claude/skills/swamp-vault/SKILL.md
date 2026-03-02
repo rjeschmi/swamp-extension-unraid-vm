@@ -87,8 +87,8 @@ swamp vault edit dev-secrets
 ## Store Secrets
 
 ```bash
-swamp vault put dev-secrets API_KEY=sk-1234567890 --json
-swamp vault put prod-secrets DB_PASSWORD=secret123 -f --json  # Skip confirmation
+swamp vault put dev-secrets API_KEY=your-api-key-here --json
+swamp vault put prod-secrets DB_PASSWORD=your-password-here -f --json  # Skip confirmation
 ```
 
 **Output shape:**
