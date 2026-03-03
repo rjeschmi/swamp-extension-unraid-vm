@@ -34,7 +34,8 @@
       "Bash(head:*)",
       "Bash(python3:*)",
       "Bash(npm info:*)",
-      "Bash(swamp workflow:*)"
+      "Bash(swamp workflow:*)",
+      "Bash(ssh:*)"
     ]
   }
 }

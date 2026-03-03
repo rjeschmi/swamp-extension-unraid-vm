@@ -1,0 +1,6 @@
+manifestVersion: 1
+name: "@rjeschmi/virsh-ssh-vm-provision"
+version: "2026.02.27.2"
+description: "Provision, control, and destroy Ubuntu VMs on any libvirt/QEMU hypervisor over SSH. No plugins required — uses virsh and cloud-init directly."
+models:
+  - virsh_ssh_vm_provision.ts

@@ -21,14 +21,15 @@ const MountSchema = z.object({
 });
 
 const ProvisionArgsSchema = z.object({
-  name: z.string().describe("VM name / hostname"),
+  name: z.string().optional().describe("VM name / hostname (auto-generated as rancher-<6 chars> if omitted)"),
   cpus: z.number().int().min(1).describe("Number of vCPUs"),
   memoryMiB: z.number().int().min(512).describe("RAM in MiB"),
   diskSizeGb: z.number().int().min(10).describe("Disk size in GB"),
   ubuntuVersion: z.enum(["24.04", "22.04", "20.04"]).describe("Ubuntu version"),
-  sshPublicKey: z.string().describe("SSH public key to inject"),
+  sshPublicKey: z.string().optional().describe("SSH public key to inject (omit when using Tailscale SSH)"),
   username: z.string().describe("Unix username to create"),
   mounts: z.array(MountSchema).optional().describe("Host paths to expose inside the VM via virtio-9p"),
+  tailscaleAuthKey: z.string().optional().describe("Tailscale auth key — when provided, the VM will auto-join the tailnet via cloud-init"),
 });
 
 const DestroyArgsSchema = z.object({
@@ -44,6 +45,7 @@ const VmSchema = z.object({
   ubuntuVersion: z.string(),
   cpus: z.number(),
   memoryMiB: z.number(),
+  tailscaleIp: z.string().optional(),
 });
 
 const VerifyResultSchema = z.object({
@@ -101,7 +103,7 @@ async function writeRemoteFileBinary(keyFile, user, host, remotePath, bytes) {
 
 export const model = {
   type: "@rjeschmi/unraid-vm-provision",
-  version: "2026.02.21.1",
+  version: "2026.03.02.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     vm: {
@@ -123,7 +125,8 @@ export const model = {
       arguments: ProvisionArgsSchema,
       execute: async (args, context) => {
         const { sshHost, sshUser, sshPrivateKey, domainsDir } = context.globalArgs;
-        const { name, cpus, memoryMiB, diskSizeGb, ubuntuVersion, sshPublicKey, username, mounts = [] } = args;
+        const { cpus, memoryMiB, diskSizeGb, ubuntuVersion, sshPublicKey, username, mounts = [], tailscaleAuthKey } = args;
+        const name = args.name || `rancher-${Math.random().toString(36).substring(2, 8)}`;
 
         const imageUrl = UBUNTU_IMAGES[ubuntuVersion];
         const imageName = imageUrl.split("/").pop();
@@ -138,7 +141,7 @@ export const model = {
         const ssh = (cmd, opts) => runSsh(keyFile, sshUser, sshHost, cmd, opts);
 
         try {
-          context.logger.info(`Provisioning ${name}: Ubuntu ${ubuntuVersion}, ${cpus} vCPU, ${memoryMiB}MiB RAM, ${diskSizeGb}GB disk`);
+          context.logger.info(`Provisioning ${name}: Ubuntu ${ubuntuVersion}, ${cpus} vCPU, ${memoryMiB}MiB RAM, ${diskSizeGb}GB disk` + (tailscaleAuthKey ? " + Tailscale" : ""));
 
           // 1. Directories
           await ssh(`mkdir -p '${cacheDir}' '${vmDir}'`);
@@ -164,23 +167,52 @@ export const model = {
           const mountsSection = mountsWithPoint.length > 0
             ? `mounts:\n${mountsWithPoint.map((m) => `  - [${m.tag}, ${m.mountPoint}, 9p, "trans=virtio,rw,nofail", 0, 0]`).join("\n")}\n`
             : "";
-          const mkdirCmds = mountsWithPoint.map((m) => `  - mkdir -p '${m.mountPoint}'`).join("\n");
 
+          const runcmdEntries = [
+            "  - systemctl enable qemu-guest-agent",
+            "  - systemctl start qemu-guest-agent",
+            ...mountsWithPoint.map((m) => `  - mkdir -p '${m.mountPoint}'`),
+          ];
+
+          // Derive the tailnet domain from sshHost (e.g. "tower.humpback-salary.ts.net" → "humpback-salary.ts.net")
+          const tailnetDomain = sshHost.split(".").slice(1).join(".");
+          const fqdn = `${name}.${tailnetDomain}`;
+
+          // When using Tailscale, pre-write the k3s TLS SAN config so the cert
+          // covers the full Tailscale FQDN before k3s ever starts.
+          const writeFilesSection = tailscaleAuthKey
+            ? `write_files:
+  - path: /etc/rancher/k3s/config.yaml
+    content: |
+      tls-san:
+        - ${name}
+        - ${fqdn}
+    owner: root:root
+    permissions: '0644'
+`
+            : "";
+
+          if (tailscaleAuthKey) {
+            runcmdEntries.push(
+              "  - curl -fsSL https://tailscale.com/install.sh | sh",
+              `  - tailscale up --auth-key=${tailscaleAuthKey} --accept-routes --accept-dns --ssh`,
+            );
+          }
+
+          const sshKeysSection = sshPublicKey
+            ? `    ssh_authorized_keys:\n      - ${sshPublicKey}\n`
+            : "";
           const userData = `#cloud-config
 hostname: ${name}
 users:
   - name: ${username}
-    ssh_authorized_keys:
-      - ${sshPublicKey}
-    sudo: ALL=(ALL) NOPASSWD:ALL
+${sshKeysSection}    sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
 package_update: true
 packages:
   - qemu-guest-agent
-${mountsSection}runcmd:
-  - systemctl enable qemu-guest-agent
-  - systemctl start qemu-guest-agent
-${mkdirCmds}
+${mountsSection}${writeFilesSection}runcmd:
+${runcmdEntries.join("\n")}
 `;
           const metaData = `instance-id: ${name}\nlocal-hostname: ${name}\n`;
 
@@ -278,7 +310,7 @@ ${mounts.map((m) => `    <filesystem type='mount' accessmode='passthrough'>
 
           context.logger.info(`VM '${name}' provisioned and started. UUID: ${uuid}`);
 
-          const handle = await context.writeResource("vm", name, {
+          const handle = await context.writeResource("vm", "rancher", {
             name, uuid, state: "RUNNING",
             diskPath: `${vmDir}/disk.qcow2`,
             ubuntuVersion, cpus, memoryMiB,

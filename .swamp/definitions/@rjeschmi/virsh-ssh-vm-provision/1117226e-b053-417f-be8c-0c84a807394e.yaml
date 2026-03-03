@@ -1,4 +1,4 @@
-type: '@rjeschmi/unraid-vm-provision'
+type: '@rjeschmi/virsh-ssh-vm-provision'
 typeVersion: 2026.02.21.1
 id: 1117226e-b053-417f-be8c-0c84a807394e
 name: rancher-vm
@@ -13,13 +13,17 @@ inputs:
   properties:
     vmName:
       type: string
-      description: Name (and hostname) for the Rancher VM (auto-generated as rancher-<6 chars> if omitted)
-      default: ""
+      description: Name (and hostname) for the Rancher VM
+      default: rancher
     username:
       type: string
       description: Unix username to create via cloud-init
       default: rancher
-  required: []
+    sshPublicKey:
+      type: string
+      description: SSH public key to inject into the VM
+  required:
+    - sshPublicKey
 methods:
   provision:
     arguments:
@@ -28,8 +32,8 @@ methods:
       memoryMiB: 8192
       diskSizeGb: 40
       ubuntuVersion: "24.04"
+      sshPublicKey: ${{ inputs.sshPublicKey }}
       username: ${{ inputs.username }}
-      tailscaleAuthKey: ${{ vault.get(unraid-secrets, TAILSCALE_AUTH_KEY) }}
       mounts:
         - hostPath: /mnt/user/home/rob
           tag: shares

@@ -9,7 +9,6 @@ globalArguments:
   sshUser: root
   sshPrivateKey: ${{ vault.get(unraid-secrets, SSH_PRIVATE_KEY) }}
   vmSshUser: rancher
-  vmSshPrivateKey: ${{ vault.get(unraid-secrets, RANCHER_VM_SSH_PRIVATE_KEY) }}
 inputs:
   properties:
     vmName:

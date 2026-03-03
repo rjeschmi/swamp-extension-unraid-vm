@@ -1,0 +1,6 @@
+manifestVersion: 1
+name: "@rjeschmi/cloud-init-iso"
+version: "2026.02.27.3"
+description: "Generates cloud-init NoCloud seed ISOs (ISO 9660) from user-data and meta-data. No external dependencies — pure Deno/TypeScript implementation."
+models:
+  - cloud_init_iso.ts

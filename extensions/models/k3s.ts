@@ -85,18 +85,17 @@ export const model = {
       description: "Install k3s on a provisioned VM via SSH and wait for the node to be ready",
       arguments: z.object({
         vmName: z.string().describe("VM name, used to discover IP via virsh"),
+        vmHost: z.string().optional().describe("Override VM host (e.g. Tailscale hostname) — skips virsh IP discovery"),
         timeoutSeconds: z.number().int().optional().describe("Max seconds to wait (default: 600)"),
       }),
       execute: async (args, context) => {
         const { sshHost, sshUser, sshPrivateKey, vmSshUser, vmSshPrivateKey } = context.globalArgs;
-        const { vmName } = args;
+        const { vmName, vmHost } = args;
         const timeoutMs = (args.timeoutSeconds ?? 600) * 1000;
         const pollInterval = 10_000;
 
         const rootKeyFile = await setupKeyFile(sshPrivateKey);
         const vmKeyFile = await setupKeyFile(vmSshPrivateKey);
-
-        const rootSsh = (cmd, opts) => runSsh(rootKeyFile, sshUser, sshHost, cmd, opts);
 
         let vmIp = null;
 
@@ -104,24 +103,31 @@ export const model = {
           context.logger.info(`Installing k3s on VM '${vmName}'...`);
           const deadline = Date.now() + timeoutMs;
 
-          // 1. Poll virsh for VM IP via guest agent
-          context.logger.info("Waiting for VM IP via virsh domifaddr...");
-          while (Date.now() < deadline) {
-            const res = await rootSsh(
-              `virsh domifaddr '${vmName}' --source agent 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1 | grep -v '^127\\.' | grep -v '^169\\.254\\.' | head -1`,
-              { allowFailure: true },
-            );
-            if (res.stdout && res.stdout.trim() !== "") {
-              vmIp = res.stdout.trim();
-              context.logger.info(`VM IP: ${vmIp}`);
-              break;
+          if (vmHost) {
+            // Use provided host directly — skip virsh discovery
+            context.logger.info(`Using provided vmHost: ${vmHost}`);
+            vmIp = vmHost;
+          } else {
+            // 1. Poll virsh for VM IP via guest agent
+            const rootSsh = (cmd, opts) => runSsh(rootKeyFile, sshUser, sshHost, cmd, opts);
+            context.logger.info("Waiting for VM IP via virsh domifaddr...");
+            while (Date.now() < deadline) {
+              const res = await rootSsh(
+                `virsh domifaddr '${vmName}' --source agent 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1 | grep -v '^127\\.' | grep -v '^169\\.254\\.' | head -1`,
+                { allowFailure: true },
+              );
+              if (res.stdout && res.stdout.trim() !== "") {
+                vmIp = res.stdout.trim();
+                context.logger.info(`VM IP: ${vmIp}`);
+                break;
+              }
+              context.logger.info("No IP yet, retrying in 10s...");
+              await new Promise((r) => setTimeout(r, pollInterval));
             }
-            context.logger.info("No IP yet, retrying in 10s...");
-            await new Promise((r) => setTimeout(r, pollInterval));
-          }
 
-          if (!vmIp) {
-            throw new Error(`VM '${vmName}' did not get an IP within timeout`);
+            if (!vmIp) {
+              throw new Error(`VM '${vmName}' did not get an IP within timeout`);
+            }
           }
 
           // 2. Poll until VM SSH is ready
@@ -181,8 +187,8 @@ export const model = {
           context.logger.info("kubeconfig fetched.");
 
           const [clusterHandle, kubeconfigHandle] = await Promise.all([
-            context.writeResource("cluster", vmName, { vmName, vmIp, k3sVersion }),
-            context.writeResource("kubeconfig", vmName, { vmName, vmIp, kubeconfig }),
+            context.writeResource("cluster", "rancher", { vmName, vmIp, k3sVersion }),
+            context.writeResource("kubeconfig", "rancher-kubeconfig", { vmName, vmIp, kubeconfig }),
           ]);
 
           return { dataHandles: [clusterHandle, kubeconfigHandle] };

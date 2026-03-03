@@ -7,8 +7,8 @@ inputs:
   properties:
     vmName:
       type: string
-      description: Name (and hostname) for the Rancher VM
-      default: rancher
+      description: Name (and hostname) for the Rancher VM (auto-generated as rancher-<6 chars> if omitted)
+      default: ""
     username:
       type: string
       description: Unix username to create via cloud-init
@@ -18,10 +18,9 @@ inputs:
       description: SSH public key to inject into the VM (corresponds to RANCHER_VM_SSH_PRIVATE_KEY in vault)
     rancherVersion:
       type: string
-      description: Rancher Helm chart version
-      default: latest
-  required:
-    - sshPublicKey
+      description: Rancher Helm chart version (leave empty for latest)
+      default: ""
+  required: []
 jobs:
   - name: provision
     description: Provision an Ubuntu VM with cloud-init
@@ -37,9 +36,9 @@ jobs:
           modelIdOrName: rancher-vm
           methodName: provision
           inputs:
-            vmName: ${{ inputs.vmName }}
+            name: ${{ inputs.vmName }}
             username: ${{ inputs.username }}
-            sshPublicKey: ${{ inputs.sshPublicKey }}
+            tailscaleAuthKey: ${{ vault.get(unraid-secrets, TAILSCALE_AUTH_KEY) }}
 
   - name: install
     description: Install k3s on the provisioned VM
@@ -58,7 +57,8 @@ jobs:
           modelIdOrName: rancher
           methodName: install
           inputs:
-            vmName: ${{ inputs.vmName }}
+            vmName: ${{ model.rancher-vm.resource.vm.rancher.attributes.name }}
+            vmHost: ${{ model.rancher-vm.resource.vm.rancher.attributes.name + ".humpback-salary.ts.net" }}
 
   - name: fetch-kubeconfig
     description: Fetch k3s kubeconfig from the VM
@@ -77,7 +77,8 @@ jobs:
           modelIdOrName: rancher-kubeconfig
           methodName: fetch
           inputs:
-            vmName: ${{ inputs.vmName }}
+            vmName: ${{ model.rancher-vm.resource.vm.rancher.attributes.name }}
+            vmHost: ${{ model.rancher-vm.resource.vm.rancher.attributes.name + ".humpback-salary.ts.net" }}
 
   - name: install-cert-manager
     description: Install cert-manager via Helm
@@ -130,8 +131,74 @@ jobs:
             repoUrl: https://releases.rancher.com/server-charts/latest
             version: ${{ inputs.rancherVersion }}
             values:
-              hostname: ${{ model.rancher-kubeconfig.resource.kubeconfig.rancher.attributes.vmIp + ".sslip.io" }}
+              hostname: rancher
               bootstrapPassword: admin
-              ingress.tls.source: rancher
-              ingress.ingressClassName: traefik
+              ingress.enabled: "false"
             waitSeconds: 1200
+
+  - name: install-tailscale-operator
+    description: Install Tailscale operator via Helm for Tailscale-native ingress
+    dependsOn:
+      - job: install-rancher
+        condition:
+          type: succeeded
+    weight: 0
+    steps:
+      - name: install
+        description: Install tailscale/tailscale-operator with OAuth credentials from vault
+        dependsOn: []
+        weight: 0
+        task:
+          type: model_method
+          modelIdOrName: rancher-install-helm
+          methodName: install
+          inputs:
+            releaseName: tailscale-operator
+            chart: tailscale/tailscale-operator
+            namespace: tailscale
+            repoName: tailscale
+            repoUrl: https://pkgs.tailscale.com/helmcharts
+            version: ""
+            values:
+              oauth.clientId: ${{ vault.get(unraid-secrets, TAILSCALE_OPERATOR_CLIENT_ID) }}
+              oauth.clientSecret: ${{ vault.get(unraid-secrets, TAILSCALE_OPERATOR_CLIENT_SECRET) }}
+            waitSeconds: 600
+
+  - name: apply-tailscale-ingress
+    description: Create Tailscale ingress for Rancher
+    dependsOn:
+      - job: install-tailscale-operator
+        condition:
+          type: succeeded
+    weight: 0
+    steps:
+      - name: apply
+        description: Apply Tailscale ingress manifest pointing to the Rancher service
+        dependsOn: []
+        weight: 0
+        task:
+          type: model_method
+          modelIdOrName: rancher-install-helm
+          methodName: applyManifest
+          inputs:
+            manifest: |
+              apiVersion: networking.k8s.io/v1
+              kind: Ingress
+              metadata:
+                name: rancher-tailscale
+                namespace: cattle-system
+              spec:
+                ingressClassName: tailscale
+                rules:
+                - http:
+                    paths:
+                    - path: /
+                      pathType: Prefix
+                      backend:
+                        service:
+                          name: rancher
+                          port:
+                            number: 443
+                tls:
+                - hosts:
+                  - rancher

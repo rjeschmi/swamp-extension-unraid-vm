@@ -3,9 +3,9 @@ import { z } from "npm:zod@4";
 const GlobalArgsSchema = z.object({
   sshHost: z.string().describe("Unraid SSH hostname or IP"),
   sshUser: z.string().describe("SSH username (root on Unraid)"),
-  sshPrivateKey: z.string().describe("SSH private key for Unraid"),
+  sshPrivateKey: z.string().optional().describe("SSH private key for Unraid (omit to rely on ssh-agent or ~/.ssh/ defaults)"),
   vmSshUser: z.string().describe("Username on the VM (created by cloud-init)"),
-  vmSshPrivateKey: z.string().describe("SSH private key for the VM user"),
+  vmSshPrivateKey: z.string().optional().describe("SSH private key for the VM user (omit to rely on ssh-agent or ~/.ssh/ defaults)"),
 });
 
 const KubeconfigSchema = z.object({
@@ -17,9 +17,10 @@ const KubeconfigSchema = z.object({
 const dec = new TextDecoder();
 
 async function runSsh(keyFile, user, host, command, { allowFailure = false } = {}) {
+  const keyArgs = keyFile ? ["-i", keyFile] : [];
   const proc = new Deno.Command("ssh", {
     args: [
-      "-i", keyFile,
+      ...keyArgs,
       "-o", "StrictHostKeyChecking=no",
       "-o", "UserKnownHostsFile=/dev/null",
       "-o", "BatchMode=yes",
@@ -43,6 +44,14 @@ async function runSsh(keyFile, user, host, command, { allowFailure = false } = {
   return { stdout, stderr, code: result.code };
 }
 
+async function setupKeyFile(privateKey?: string): Promise<string | null> {
+  if (!privateKey) return null;
+  const path = `/tmp/.swamp-rk-${Date.now()}`;
+  const content = privateKey.endsWith("\n") ? privateKey : privateKey + "\n";
+  await Deno.writeTextFile(path, content, { mode: 0o600 });
+  return path;
+}
+
 export const model = {
   type: "@rjeschmi/rancher-kubeconfig",
   version: "2026.02.23.1",
@@ -60,29 +69,34 @@ export const model = {
       description: "Fetch k3s kubeconfig from /etc/rancher/k3s/k3s.yaml on the Rancher VM, rewriting the server address to the VM's real IP",
       arguments: z.object({
         vmName: z.string().describe("VM name used to discover its IP via virsh on Unraid"),
+        vmHost: z.string().optional().describe("Override VM host (e.g. Tailscale hostname) — skips virsh IP discovery"),
       }),
       execute: async (args, context) => {
         const { sshHost, sshUser, sshPrivateKey, vmSshUser, vmSshPrivateKey } = context.globalArgs;
-        const { vmName } = args;
+        const { vmName, vmHost } = args;
 
-        const rootKeyFile = `/tmp/.swamp-rk-root-${Date.now()}`;
-        const vmKeyFile = `/tmp/.swamp-rk-vm-${Date.now()}`;
-        await Deno.writeTextFile(rootKeyFile, sshPrivateKey.endsWith("\n") ? sshPrivateKey : sshPrivateKey + "\n", { mode: 0o600 });
-        await Deno.writeTextFile(vmKeyFile, vmSshPrivateKey.endsWith("\n") ? vmSshPrivateKey : vmSshPrivateKey + "\n", { mode: 0o600 });
+        const rootKeyFile = await setupKeyFile(sshPrivateKey);
+        const vmKeyFile = await setupKeyFile(vmSshPrivateKey);
 
         try {
-          // Discover VM IP via virsh guest agent on Unraid
-          context.logger.info(`Discovering IP for VM '${vmName}' via virsh...`);
-          const ipRes = await runSsh(
-            rootKeyFile, sshUser, sshHost,
-            `virsh domifaddr '${vmName}' --source agent 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1 | grep -v '^127\\.' | grep -v '^169\\.254\\.' | head -1`,
-            { allowFailure: true },
-          );
-          const vmIp = ipRes.stdout.trim();
-          if (!vmIp) {
-            throw new Error(`Could not discover IP for VM '${vmName}' — is the VM running and does it have qemu-guest-agent?`);
+          let vmIp;
+          if (vmHost) {
+            context.logger.info(`Using provided vmHost: ${vmHost}`);
+            vmIp = vmHost;
+          } else {
+            // Discover VM IP via virsh guest agent on Unraid
+            context.logger.info(`Discovering IP for VM '${vmName}' via virsh...`);
+            const ipRes = await runSsh(
+              rootKeyFile, sshUser, sshHost,
+              `virsh domifaddr '${vmName}' --source agent 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1 | grep -v '^127\\.' | grep -v '^169\\.254\\.' | head -1`,
+              { allowFailure: true },
+            );
+            vmIp = ipRes.stdout.trim();
+            if (!vmIp) {
+              throw new Error(`Could not discover IP for VM '${vmName}' — is the VM running and does it have qemu-guest-agent?`);
+            }
+            context.logger.info(`VM IP: ${vmIp}`);
           }
-          context.logger.info(`VM IP: ${vmIp}`);
 
           // Fetch kubeconfig from the VM
           context.logger.info("Fetching /etc/rancher/k3s/k3s.yaml...");
@@ -97,7 +111,7 @@ export const model = {
 
           context.logger.info("Kubeconfig fetched and server address rewritten.");
 
-          const handle = await context.writeResource("kubeconfig", vmName, {
+          const handle = await context.writeResource("kubeconfig", "rancher", {
             vmName,
             vmIp,
             kubeconfig,
@@ -105,8 +119,8 @@ export const model = {
 
           return { dataHandles: [handle] };
         } finally {
-          await Deno.remove(rootKeyFile).catch(() => {});
-          await Deno.remove(vmKeyFile).catch(() => {});
+          if (rootKeyFile) await Deno.remove(rootKeyFile).catch(() => {});
+          if (vmKeyFile) await Deno.remove(vmKeyFile).catch(() => {});
         }
       },
     },

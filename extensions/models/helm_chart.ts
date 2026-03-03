@@ -33,6 +33,31 @@ async function runHelm(kubeconfigFile, args, { allowFailure = false } = {}) {
   return { stdout, stderr, code: result.code };
 }
 
+async function runKubectl(kubeconfigFile, args, stdin?: string, { allowFailure = false } = {}) {
+  const proc = new Deno.Command("kubectl", {
+    args,
+    env: { ...Deno.env.toObject(), KUBECONFIG: kubeconfigFile },
+    stdout: "piped",
+    stderr: "piped",
+    stdin: stdin ? "piped" : "null",
+  });
+
+  const child = proc.spawn();
+  if (stdin) {
+    const writer = child.stdin.getWriter();
+    await writer.write(new TextEncoder().encode(stdin));
+    await writer.close();
+  }
+  const result = await child.output();
+  const stdout = dec.decode(result.stdout).trim();
+  const stderr = dec.decode(result.stderr).trim();
+
+  if (!allowFailure && result.code !== 0) {
+    throw new Error(`kubectl failed (exit ${result.code}):\n$ kubectl ${args.join(" ")}\nstderr: ${stderr}`);
+  }
+  return { stdout, stderr, code: result.code };
+}
+
 async function withKubeconfig(kubeconfig, fn) {
   const kubeconfigFile = `/tmp/.swamp-helm-kubeconfig-${Date.now()}`;
   await Deno.writeTextFile(kubeconfigFile, kubeconfig.endsWith("\n") ? kubeconfig : kubeconfig + "\n", { mode: 0o600 });
@@ -45,7 +70,7 @@ async function withKubeconfig(kubeconfig, fn) {
 
 export const model = {
   type: "@rjeschmi/helm-chart",
-  version: "2026.02.27.2",
+  version: "2026.03.03.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     release: {
@@ -155,6 +180,22 @@ export const model = {
           });
 
           return { dataHandles: [handle] };
+        });
+      },
+    },
+
+    applyManifest: {
+      description: "Apply a Kubernetes manifest using kubectl apply",
+      arguments: z.object({
+        manifest: z.string().describe("YAML manifest to apply"),
+      }),
+      execute: async (args, context) => {
+        const { kubeconfig } = context.globalArgs;
+        return await withKubeconfig(kubeconfig, async (kubeconfigFile) => {
+          context.logger.info("Applying manifest...");
+          const result = await runKubectl(kubeconfigFile, ["apply", "-f", "-"], args.manifest);
+          context.logger.info(result.stdout);
+          return { dataHandles: [] };
         });
       },
     },
