@@ -71,6 +71,53 @@ across provisions. VM disks are qcow2 with a backing file (no full copy).
 
 ---
 
+### `@rjeschmi/virsh-ssh-vm-provision`
+
+Generic libvirt/QEMU VM provisioner over SSH. Supports multiple NICs, isolated
+network creation, and IP discovery via the guest agent. No Unraid-specific
+dependencies — works on any host with `virsh`/QEMU available over SSH.
+
+**Global arguments:**
+
+| Argument        | Description |
+|-----------------|-------------|
+| `sshHost`       | Hypervisor SSH hostname or IP |
+| `sshUser`       | SSH username (e.g. `root`) |
+| `sshPrivateKey` | SSH private key in PEM format (optional — omit to use ssh-agent) |
+| `domainsDir`    | VM storage base directory |
+
+**Methods:** `provision`, `verify`, `destroy`, `restart`, `dumpXml`
+
+**`provision` arguments:**
+
+| Argument             | Description |
+|----------------------|-------------|
+| `name`               | VM name / hostname |
+| `cpus`               | Number of vCPUs |
+| `memoryMiB`          | RAM in MiB |
+| `diskSizeGb`         | Disk size in GB |
+| `ubuntuVersion`      | `24.04`, `22.04`, or `20.04` |
+| `sshPublicKey`       | SSH public key to inject |
+| `username`           | Unix username to create |
+| `managementBridge`   | Host bridge for primary NIC (e.g. `br0`) — VM gets a real LAN IP. Omit to use `managementNetwork` instead. |
+| `managementNetwork`  | Libvirt network for primary NIC when no bridge is set (default: `default`) |
+| `extraNics`          | Additional NICs — each has `type` (`network` or `bridge`) and `name` |
+| `isolatedNetworks`   | Isolated libvirt networks to create if missing (no DHCP, no NAT) — each has `name` and `bridge` |
+| `mounts`             | Host paths to expose inside the VM via virtio-9p |
+
+Provision blocks until the VM gets an IP via the guest agent (up to 5 min) and
+stores it in the `vm` resource. VMs are headless (no VNC/video).
+
+**`destroy` arguments:**
+
+| Argument         | Description |
+|------------------|-------------|
+| `name`           | VM name to destroy |
+| `keepVm`         | Skip destruction and leave the VM running |
+| `removeNetworks` | Libvirt network names to remove after destroying the VM |
+
+---
+
 ### `@rjeschmi/cloud-init-iso`
 
 Generates a cloud-init NoCloud seed ISO (ISO 9660) locally in pure JavaScript —

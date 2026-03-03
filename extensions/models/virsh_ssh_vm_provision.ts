@@ -8,16 +8,26 @@ const UBUNTU_IMAGES = {
 };
 
 const GlobalArgsSchema = z.object({
-  sshHost: z.string().describe("Unraid SSH hostname or IP"),
-  sshUser: z.string().describe("SSH username (root on Unraid)"),
+  sshHost: z.string().describe("Hypervisor SSH hostname or IP"),
+  sshUser: z.string().describe("SSH username (e.g. root)"),
   sshPrivateKey: z.string().optional().describe("SSH private key in PEM format (omit to rely on ssh-agent or ~/.ssh/ defaults)"),
   domainsDir: z.string().describe("VM storage base directory"),
 });
 
 const MountSchema = z.object({
-  hostPath: z.string().describe("Host path on Unraid to expose (e.g. /mnt/user/home/rob)"),
+  hostPath: z.string().describe("Host path to expose (e.g. /mnt/user/home/rob)"),
   tag: z.string().describe("Mount tag — used as the device name when mounting inside the VM"),
   mountPoint: z.string().optional().describe("Path inside the VM to automount via cloud-init (omit to skip)"),
+});
+
+const ExtraNicSchema = z.object({
+  type: z.enum(["network", "bridge"]).describe("libvirt network or host bridge"),
+  name: z.string().describe("Network name (libvirt) or bridge name (host)"),
+});
+
+const IsolatedNetworkSchema = z.object({
+  name: z.string().describe("Libvirt network name to create if it does not already exist"),
+  bridge: z.string().describe("Bridge device name for the isolated network (e.g. virbr-osext)"),
 });
 
 const ProvisionArgsSchema = z.object({
@@ -28,18 +38,24 @@ const ProvisionArgsSchema = z.object({
   ubuntuVersion: z.enum(["24.04", "22.04", "20.04"]).describe("Ubuntu version"),
   sshPublicKey: z.string().describe("SSH public key to inject"),
   username: z.string().describe("Unix username to create"),
+  managementBridge: z.string().optional().describe("Host bridge for the primary NIC (e.g. br0) — VM gets a real LAN IP. If omitted, managementNetwork is used instead."),
+  managementNetwork: z.string().default("default").describe("Libvirt network for the primary NIC when managementBridge is not set"),
+  extraNics: z.array(ExtraNicSchema).optional().describe("Additional NICs to attach (e.g. an isolated Neutron external network)"),
+  isolatedNetworks: z.array(IsolatedNetworkSchema).optional().describe("Isolated libvirt networks to create if they do not exist (no DHCP, no NAT)"),
   mounts: z.array(MountSchema).optional().describe("Host paths to expose inside the VM via virtio-9p"),
 });
 
 const DestroyArgsSchema = z.object({
   name: z.string().describe("VM name to destroy"),
   keepVm: z.boolean().optional().describe("If true, skip destruction and leave the VM running"),
+  removeNetworks: z.array(z.string()).optional().describe("Libvirt network names to remove after destroying the VM"),
 });
 
 const VmSchema = z.object({
   name: z.string(),
   uuid: z.string().optional(),
   state: z.string(),
+  ip: z.string().optional(),
   diskPath: z.string().optional(),
   ubuntuVersion: z.string().optional(),
   cpus: z.number().optional(),
@@ -63,8 +79,6 @@ const VerifyResultSchema = z.object({
 
 const dec = new TextDecoder();
 
-// Write a private key to a temp file and return the path, or return null if no key provided.
-// Caller must clean up with cleanupKeyFile().
 async function setupKeyFile(privateKey?: string): Promise<string | null> {
   if (!privateKey) return null;
   const path = `/tmp/.swamp-unraid-${Date.now()}`;
@@ -103,13 +117,11 @@ async function runSsh(keyFile, user, host, command, { allowFailure = false } = {
   return { stdout, stderr, code: result.code };
 }
 
-// Write a remote file by base64-encoding content — avoids all shell escaping issues
 async function writeRemoteFile(keyFile, user, host, remotePath, content) {
   const b64 = btoa(content);
   await runSsh(keyFile, user, host, `printf '%s' '${b64}' | base64 -d > '${remotePath}'`);
 }
 
-// Write a remote binary file (Uint8Array) via base64
 async function writeRemoteFileBinary(keyFile, user, host, remotePath, bytes) {
   let binary = "";
   const chunk = 8192;
@@ -122,7 +134,7 @@ async function writeRemoteFileBinary(keyFile, user, host, remotePath, bytes) {
 
 export const model = {
   type: "@rjeschmi/virsh-ssh-vm-provision",
-  version: "2026.02.27.1",
+  version: "2026.03.03.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     vm: {
@@ -146,30 +158,52 @@ export const model = {
   },
   methods: {
     provision: {
-      description: "Provision a new Ubuntu cloud-init VM on Unraid via SSH + libvirt",
+      description: "Provision a new Ubuntu cloud-init VM via SSH + libvirt. Supports multiple NICs and isolated network creation.",
       arguments: ProvisionArgsSchema,
       execute: async (args, context) => {
         const { sshHost, sshUser, sshPrivateKey, domainsDir } = context.globalArgs;
-        const { name, cpus, memoryMiB, diskSizeGb, ubuntuVersion, sshPublicKey, username, mounts = [] } = args;
+        const {
+          name, cpus, memoryMiB, diskSizeGb, ubuntuVersion, sshPublicKey, username,
+          managementBridge, managementNetwork, extraNics = [], isolatedNetworks = [], mounts = [],
+        } = args;
 
         const imageUrl = UBUNTU_IMAGES[ubuntuVersion];
         const imageName = imageUrl.split("/").pop();
         const cacheDir = `${domainsDir}/.cloud-images`;
         const vmDir = `${domainsDir}/${name}`;
 
-        // Write SSH key to a temp file for the duration of this operation (null = use ssh-agent/default)
         const keyFile = await setupKeyFile(sshPrivateKey);
-
-        const ssh = (cmd, opts) => runSsh(keyFile, sshUser, sshHost, cmd, opts);
+        const ssh = (cmd, opts?) => runSsh(keyFile, sshUser, sshHost, cmd, opts);
 
         try {
           context.logger.info(`Provisioning ${name}: Ubuntu ${ubuntuVersion}, ${cpus} vCPU, ${memoryMiB}MiB RAM, ${diskSizeGb}GB disk`);
 
-          // 1. Directories
+          // 1. Create any isolated networks that don't exist yet
+          for (const net of isolatedNetworks) {
+            context.logger.info(`Checking for isolated libvirt network '${net.name}'...`);
+            const check = await ssh(`virsh net-info '${net.name}' 2>/dev/null && echo exists || echo missing`, { allowFailure: true });
+            if (check.stdout.includes("missing")) {
+              context.logger.info(`Creating isolated libvirt network '${net.name}' (bridge: ${net.bridge})...`);
+              const xml = `<network>\n  <name>${net.name}</name>\n  <bridge name='${net.bridge}'/>\n</network>`;
+              await writeRemoteFile(keyFile, sshUser, sshHost, `/tmp/${net.name}.xml`, xml);
+              await ssh(`virsh net-define /tmp/${net.name}.xml`);
+              await ssh(`virsh net-start '${net.name}'`);
+              await ssh(`virsh net-autostart '${net.name}'`);
+              context.logger.info(`Network '${net.name}' created.`);
+            } else {
+              const active = await ssh(`virsh net-info '${net.name}' | awk '/Active:/{print $2}'`, { allowFailure: true });
+              if (active.stdout.trim() !== "yes") {
+                await ssh(`virsh net-start '${net.name}'`, { allowFailure: true });
+              }
+              context.logger.info(`Network '${net.name}' already exists.`);
+            }
+          }
+
+          // 2. Directories
           await ssh(`mkdir -p '${cacheDir}' '${vmDir}'`);
           context.logger.info("Directories ready.");
 
-          // 2. Download cloud image if not cached
+          // 3. Download cloud image if not cached
           const cached = await ssh(`test -f '${cacheDir}/${imageName}' && echo yes || echo no`, { allowFailure: true });
           if (cached.stdout === "no") {
             context.logger.info(`Downloading Ubuntu ${ubuntuVersion} cloud image (this may take a while)...`);
@@ -179,11 +213,11 @@ export const model = {
             context.logger.info("Using cached cloud image.");
           }
 
-          // 3. Create VM disk (qcow2 backed by cached cloud image — efficient, no full copy)
+          // 4. Create VM disk (qcow2 backed by cached cloud image)
           context.logger.info(`Creating ${diskSizeGb}GB qcow2 disk...`);
           await ssh(`qemu-img create -f qcow2 -F qcow2 -b '${cacheDir}/${imageName}' '${vmDir}/disk.qcow2' ${diskSizeGb}G`);
 
-          // 4. Build cloud-init seed ISO locally and upload — no remote tools required
+          // 5. Build cloud-init seed ISO
           context.logger.info("Building cloud-init seed ISO...");
           const mountsWithPoint = mounts.filter((m) => m.mountPoint);
           const mountsSection = mountsWithPoint.length > 0
@@ -199,25 +233,21 @@ users:
       - ${sshPublicKey}
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
-package_update: true
+package_update: false
 packages:
   - qemu-guest-agent
 ${mountsSection}runcmd:
-  - systemctl enable qemu-guest-agent
-  - systemctl start qemu-guest-agent
+  - systemctl enable --now qemu-guest-agent
 ${mkdirCmds}
 `;
           const metaData = `instance-id: ${name}\nlocal-hostname: ${name}\n`;
-
           const isoBytes = makeCloudInitIso(userData, metaData);
           await writeRemoteFileBinary(keyFile, sshUser, sshHost, `${vmDir}/seed.iso`, isoBytes);
           context.logger.info(`Seed ISO uploaded (${isoBytes.length} bytes).`);
 
-          // 5. Resolve emulator path, machine type, and generate UUID in parallel
+          // 6. Resolve emulator path, machine type, and UUID
           context.logger.info("Resolving QEMU emulator, machine type, and UUID...");
           const [emulatorRes, uuidRes, machineRes] = await Promise.all([
-            // Get emulator from an existing domain (most reliable — reuses what already works),
-            // falling back to the x86_64 entry in virsh capabilities
             ssh(
               `virsh list --all --name 2>/dev/null | grep -v '^$' | head -1 | xargs -r -I{} virsh dumpxml '{}' 2>/dev/null | grep -m1 '<emulator>' | sed 's|.*<emulator>||;s|</emulator>.*||' | grep -v '^$'` +
               ` || virsh capabilities 2>/dev/null | awk '/x86_64/{f=1} f && /<emulator>/{sub(/.*<emulator>/,""); sub(/<\\/emulator>.*/,""); print; exit}'` +
@@ -233,7 +263,18 @@ ${mkdirCmds}
           const machine = machineRes.stdout.trim() || "pc-q35-8.2";
           context.logger.info(`Emulator: ${emulator}  Machine: ${machine}  UUID: ${uuid}`);
 
-          // 6. Write libvirt domain XML and define it
+          // 7. Build NIC XML — primary NIC (bridge or libvirt network) + any extra NICs
+          const primaryNicXml = managementBridge
+            ? `<interface type='bridge'>\n      <source bridge='${managementBridge}'/>\n      <model type='virtio'/>\n    </interface>`
+            : `<interface type='network'>\n      <source network='${managementNetwork}'/>\n      <model type='virtio'/>\n    </interface>`;
+
+          const extraNicsXml = extraNics.map((nic) =>
+            nic.type === "bridge"
+              ? `<interface type='bridge'>\n      <source bridge='${nic.name}'/>\n      <model type='virtio'/>\n    </interface>`
+              : `<interface type='network'>\n      <source network='${nic.name}'/>\n      <model type='virtio'/>\n    </interface>`
+          ).join("\n    ");
+
+          // 8. Write libvirt domain XML and define it
           context.logger.info("Defining VM in libvirt...");
           const domainXml = `<domain type='kvm'>
   <name>${name}</name>
@@ -264,20 +305,11 @@ ${mkdirCmds}
       <target dev='sda' bus='sata'/>
       <readonly/>
     </disk>
-    <interface type='bridge'>
-      <source bridge='br0'/>
-      <model type='virtio'/>
-    </interface>
+    ${primaryNicXml}
+    ${extraNicsXml}
     <input type='tablet' bus='usb'/>
     <input type='mouse' bus='ps2'/>
     <input type='keyboard' bus='ps2'/>
-    <graphics type='vnc' port='-1' autoport='yes' websocket='-1' listen='0.0.0.0' sharePolicy='ignore'>
-      <listen type='address' address='0.0.0.0'/>
-    </graphics>
-    <audio id='1' type='none'/>
-    <video>
-      <model type='virtio' heads='1' primary='yes'/>
-    </video>
     <serial type='pty'>
       <target type='isa-serial' port='0'/>
     </serial>
@@ -297,14 +329,35 @@ ${mounts.map((m) => `    <filesystem type='mount' accessmode='passthrough'>
           await writeRemoteFile(keyFile, sshUser, sshHost, `${vmDir}/domain.xml`, domainXml);
           await ssh(`virsh define '${vmDir}/domain.xml'`);
 
-          // 7. Start VM
+          // 9. Start VM and poll for IP via guest agent
           context.logger.info("Starting VM...");
           await ssh(`virsh start '${name}'`);
+          context.logger.info(`VM '${name}' started. Polling for IP via guest agent (up to 5 min)...`);
 
-          context.logger.info(`VM '${name}' provisioned and started. UUID: ${uuid}`);
+          const deadline = Date.now() + 300_000;
+          let vmIp: string | null = null;
+          while (Date.now() < deadline) {
+            const res = await ssh(
+              `virsh domifaddr '${name}' --source agent 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1 | grep -v '^127\\.' | grep -v '^169\\.254\\.' | head -1`,
+              { allowFailure: true },
+            );
+            if (res.stdout && res.stdout.trim() !== "") {
+              vmIp = res.stdout.trim();
+              context.logger.info(`VM IP: ${vmIp}`);
+              break;
+            }
+            context.logger.info("Waiting for guest agent IP (cloud-init running)...");
+            await new Promise((r) => setTimeout(r, 15_000));
+          }
+
+          if (!vmIp) {
+            throw new Error(`VM '${name}' did not get an IP within 5 minutes. Check: virsh domifaddr ${name} --source agent`);
+          }
+
+          context.logger.info(`VM '${name}' provisioned — IP: ${vmIp}  User: ${username}`);
 
           const handle = await context.writeResource("vm", name, {
-            name, uuid, state: "RUNNING",
+            name, uuid, state: "RUNNING", ip: vmIp,
             diskPath: `${vmDir}/disk.qcow2`,
             ubuntuVersion, cpus, memoryMiB,
           });
@@ -366,16 +419,14 @@ ${mounts.map((m) => `    <filesystem type='mount' accessmode='passthrough'>
 
         const rootKeyFile = await setupKeyFile(sshPrivateKey);
         const userKeyFile = await setupKeyFile(userSshPrivateKey);
+        const rootSsh = (cmd, opts?) => runSsh(rootKeyFile, sshUser, sshHost, cmd, opts);
 
-        const rootSsh = (cmd, opts) => runSsh(rootKeyFile, sshUser, sshHost, cmd, opts);
-
-        let vmIp = null;
+        let vmIp: string | null = null;
 
         try {
           context.logger.info(`Waiting for VM '${name}' to boot (timeout: ${args.timeoutSeconds ?? 300}s)...`);
           const deadline = Date.now() + timeoutMs;
 
-          // Poll guest agent for IP (available once VM has DHCP lease and agent is running)
           while (Date.now() < deadline) {
             const res = await rootSsh(
               `virsh domifaddr '${name}' --source agent 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1 | grep -v '^127\\.' | grep -v '^169\\.254\\.' | head -1`,
@@ -390,29 +441,20 @@ ${mounts.map((m) => `    <filesystem type='mount' accessmode='passthrough'>
             await new Promise((r) => setTimeout(r, pollInterval));
           }
 
-          if (!vmIp) {
-            throw new Error(`VM '${name}' did not get an IP within ${args.timeoutSeconds ?? 300}s`);
-          }
+          if (!vmIp) throw new Error(`VM '${name}' did not get an IP within ${args.timeoutSeconds ?? 300}s`);
 
-          // Poll until SSH is reachable as the provisioned user
           let sshReady = false;
           while (Date.now() < deadline) {
             const res = await runSsh(userKeyFile, expectedUsername, vmIp, "echo ready", { allowFailure: true });
-            if (res.code === 0 && res.stdout.trim() === "ready") {
-              sshReady = true;
-              break;
-            }
+            if (res.code === 0 && res.stdout.trim() === "ready") { sshReady = true; break; }
             context.logger.info("SSH not ready yet, retrying in 10s...");
             await new Promise((r) => setTimeout(r, pollInterval));
           }
 
-          if (!sshReady) {
-            throw new Error(`VM '${name}' (${vmIp}) SSH not available within timeout`);
-          }
+          if (!sshReady) throw new Error(`VM '${name}' (${vmIp}) SSH not available within timeout`);
 
           context.logger.info("SSH ready. Running cloud-init verification...");
 
-          // Wait for cloud-init to finish, then collect results
           const [hostnameRes, userRes, ciRes] = await Promise.all([
             runSsh(userKeyFile, expectedUsername, vmIp, "hostname"),
             runSsh(userKeyFile, expectedUsername, vmIp, `id ${expectedUsername}`, { allowFailure: true }),
@@ -423,25 +465,17 @@ ${mounts.map((m) => `    <filesystem type='mount' accessmode='passthrough'>
 
           const actualHostname = hostnameRes.stdout.trim();
           let cloudInitStatus = "unknown";
-          try {
-            cloudInitStatus = JSON.parse(ciRes.stdout).status ?? "unknown";
-          } catch {
-            cloudInitStatus = ciRes.stdout.trim() || "unknown";
-          }
+          try { cloudInitStatus = JSON.parse(ciRes.stdout).status ?? "unknown"; } catch { cloudInitStatus = ciRes.stdout.trim() || "unknown"; }
 
           context.logger.info(`hostname: expected='${expectedHostname}' actual='${actualHostname}'`);
           context.logger.info(`user '${expectedUsername}': ${userRes.code === 0 ? "exists" : "NOT FOUND"}`);
           context.logger.info(`cloud-init status: ${cloudInitStatus}`);
 
-          const passed = actualHostname === expectedHostname &&
-            userRes.code === 0 &&
-            cloudInitStatus === "done";
+          const passed = actualHostname === expectedHostname && userRes.code === 0 && cloudInitStatus === "done";
 
           if (!passed) {
             const reasons = [];
-            if (actualHostname !== expectedHostname) {
-              reasons.push(`hostname: got '${actualHostname}', expected '${expectedHostname}'`);
-            }
+            if (actualHostname !== expectedHostname) reasons.push(`hostname: got '${actualHostname}', expected '${expectedHostname}'`);
             if (userRes.code !== 0) reasons.push(`user '${expectedUsername}' not found`);
             if (cloudInitStatus !== "done") reasons.push(`cloud-init status '${cloudInitStatus}' (expected 'done')`);
             throw new Error(`Verification failed: ${reasons.join("; ")}`);
@@ -575,11 +609,11 @@ ${mounts.map((m) => `    <filesystem type='mount' accessmode='passthrough'>
     },
 
     destroy: {
-      description: "Destroy a provisioned VM and remove its disk files",
+      description: "Destroy a VM, remove its disk files, and optionally remove libvirt networks",
       arguments: DestroyArgsSchema,
       execute: async (args, context) => {
         const { sshHost, sshUser, sshPrivateKey, domainsDir } = context.globalArgs;
-        const { name, keepVm } = args;
+        const { name, keepVm, removeNetworks = [] } = args;
 
         if (keepVm) {
           context.logger.info(`Skipping destroy for VM '${name}' (keepVm=true). VM is still running.`);
@@ -588,7 +622,7 @@ ${mounts.map((m) => `    <filesystem type='mount' accessmode='passthrough'>
 
         const vmDir = `${domainsDir}/${name}`;
         const keyFile = await setupKeyFile(sshPrivateKey);
-        const ssh = (cmd, opts) => runSsh(keyFile, sshUser, sshHost, cmd, opts);
+        const ssh = (cmd, opts?) => runSsh(keyFile, sshUser, sshHost, cmd, opts);
 
         try {
           context.logger.info(`Destroying VM: ${name}`);
@@ -596,6 +630,13 @@ ${mounts.map((m) => `    <filesystem type='mount' accessmode='passthrough'>
           await ssh(`virsh undefine '${name}' --nvram 2>/dev/null || virsh undefine '${name}'`, { allowFailure: true });
           await ssh(`rm -rf '${vmDir}'`);
           context.logger.info(`VM '${name}' destroyed.`);
+
+          for (const net of removeNetworks) {
+            context.logger.info(`Removing libvirt network '${net}'...`);
+            await ssh(`virsh net-destroy '${net}' 2>/dev/null; true`, { allowFailure: true });
+            await ssh(`virsh net-undefine '${net}' 2>/dev/null; true`, { allowFailure: true });
+            context.logger.info(`Network '${net}' removed.`);
+          }
         } finally {
           await cleanupKeyFile(keyFile);
         }
