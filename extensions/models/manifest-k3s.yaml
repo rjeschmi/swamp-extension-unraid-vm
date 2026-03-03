@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@rjeschmi/k3s"
-version: "2026.02.27.2"
-description: "Install and manage k3s on VMs over SSH. Discovers VM IPs via virsh guest agent and waits for the node to reach ready state."
+version: "2026.03.02.1"
+description: "Install and manage k3s on VMs over SSH. Supports vmHost override for Tailscale-based connectivity, auto-fetches kubeconfig on install."
 models:
   - k3s.ts

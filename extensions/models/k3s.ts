@@ -64,7 +64,7 @@ async function cleanupKeyFile(path: string | null) {
 
 export const model = {
   type: "@rjeschmi/k3s",
-  version: "2026.02.27.2",
+  version: "2026.03.02.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     cluster: {

@@ -30,3 +30,25 @@ models/*/workflow/
 
 # OpenStack credentials
 openrc.sh
+
+# Node modules
+node_modules/
+
+# BEGIN swamp managed section - DO NOT EDIT
+
+# Local telemetry (not needed for reconstruction)
+.swamp/telemetry/
+
+# Audit command logs (local-only hook data)
+.swamp/audit/
+
+# Encryption keyfile (NEVER commit - allows decrypting secrets)
+.swamp/secrets/keyfile
+
+# Cached extension bundles (regenerated at runtime)
+.swamp/bundles/
+.swamp/vault-bundles/
+
+# Claude Code configuration (managed by swamp)
+.claude/
+# END swamp managed section
